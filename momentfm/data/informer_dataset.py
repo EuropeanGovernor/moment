@@ -1,9 +1,15 @@
 from typing import Optional
-
+from dataclasses import dataclass
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
+@dataclass
+class DataSplits:
+    train: npt.NDArray = None
+    val: npt.NDArray = None
+    test: npt.NDArray = None
 
 class InformerDataset:
     def __init__(
@@ -13,6 +19,13 @@ class InformerDataset:
         data_stride_len: int = 1,
         task_name: str = "forecasting",
         random_seed: int = 42,
+        full_file_path_and_name="./long_term_forecast/ETT-small/ETTh1.csv",
+        scale = True,
+        target_col : Optional[str] = "OT",
+        train_ratio: float = 0.6,
+        val_ratio: float = 0.1,
+        test_ratio: float = 0.3,
+        output_type: str = "univariate",
     ):
         """
         Parameters
@@ -33,29 +46,56 @@ class InformerDataset:
 
         self.seq_len = 512
         self.forecast_horizon = forecast_horizon
-        self.full_file_path_and_name = "../data/ETTh1.csv"
+        self.full_file_path_and_name = full_file_path_and_name
         self.data_split = data_split
         self.data_stride_len = data_stride_len
         self.task_name = task_name
         self.random_seed = random_seed
-
+        self.dataset_name =self.full_file_path_and_name.split("/")[-1][:-4]
+        self.scale = scale
+        self.target_col = target_col
+        self.train_ratio = train_ratio
+        self.val_ratio = val_ratio
+        self.test_ratio = test_ratio
+        self.output_type = output_type
         # Read data
         self._read_data()
 
     def _get_borders(self):
-        n_train = 12 * 30 * 24
-        n_val = 4 * 30 * 24
-        n_test = 4 * 30 * 24
+        remaining_autoformer_datasets = [
+            "electricity",
+            "exchange_rate",
+            "national_illness",
+            "traffic",
+            "weather",
+        ]
+
+        if "ETTm" in self.dataset_name:
+            n_train = 12 * 30 * 24 * 4
+            n_val = 4 * 30 * 24 * 4
+            n_test = 4 * 30 * 24 * 4
+
+        elif "ETTh" in self.dataset_name:
+            n_train = 12 * 30 * 24
+            n_val = 4 * 30 * 24
+            n_test = 4 * 30 * 24
+
+        elif self.dataset_name in remaining_autoformer_datasets:
+            n_train = int(self.train_ratio * self.length_timeseries_original)
+            n_test = int(self.test_ratio * self.length_timeseries_original)
+            n_val = self.length_timeseries_original - n_train - n_test
 
         train_end = n_train
+        val_start = train_end - self.seq_len
         val_end = n_train + n_val
         test_start = val_end - self.seq_len
         test_end = test_start + n_test + self.seq_len
 
-        train = slice(0, train_end)
-        test = slice(test_start, test_end)
-
-        return train, test
+        return DataSplits(
+            train=slice(0, train_end),
+            val=slice(val_start, val_end),
+            test=slice(test_start, test_end),
+        )
 
     def _read_data(self):
         self.scaler = StandardScaler()
@@ -66,24 +106,40 @@ class InformerDataset:
         df.drop(columns=["date"], inplace=True)
         df = df.infer_objects(copy=False).interpolate(method="cubic")
 
+        # if self.target_col in list(df.columns) and self.output_type == "univariate":
+        #     df = df[[self.target_col]]
+        #     self.n_channels = 1
+        # elif (
+        #     self.target_col is None
+        #     and self.output_type == "univariate"
+        #     and self.n_channels > 1
+        # ):
+        #     raise ValueError(
+        #         "target_col must be specified if output_type\
+        #                       is 'univariate' for multi-channel datasets"
+        #     )
         data_splits = self._get_borders()
 
-        train_data = df[data_splits[0]]
-        self.scaler.fit(train_data.values)
-        df = self.scaler.transform(df.values)
+        if self.scale:
+            train_data = df[data_splits.train]
+            self.scaler.fit(train_data.values)
+            df = self.scaler.transform(df.values)
+        else:
+            df = df.values
 
         if self.data_split == "train":
-            self.data = df[data_splits[0], :]
+            self.data = df[data_splits.train, :]
+        elif self.data_split == "val":
+            self.data = df[data_splits.val, :]
         elif self.data_split == "test":
-            self.data = df[data_splits[1], :]
+            self.data = df[data_splits.test, :]
 
         self.length_timeseries = self.data.shape[0]
 
     def __getitem__(self, index):
         seq_start = self.data_stride_len * index
         seq_end = seq_start + self.seq_len
-        input_mask = np.ones(self.seq_len)
-
+        input_mask=np.ones(self.seq_len)
         if self.task_name == "forecasting":
             pred_end = seq_end + self.forecast_horizon
 

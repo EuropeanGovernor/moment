@@ -619,7 +619,6 @@ class L2pMOMENT(nn.Module):
         self.task_name = config.task_name
         self.seq_len = config.seq_len
         self.patch_len = config.patch_len
-
         self.normalizer = RevIN(
             num_features=1, affine=config.getattr("revin_affine", False)
         )
@@ -627,6 +626,7 @@ class L2pMOMENT(nn.Module):
             patch_len=config.patch_len, stride=config.patch_stride_len
         )
         # ToDo: Check the setup of positional embedding after loading pretrained moment --> Correct. Set to False.
+        # ZYM: patch_len=8, patch_stride_len=8
         self.patch_embedding = PatchEmbedding(
             d_model=config.d_model,
             seq_len=config.seq_len,
@@ -680,7 +680,6 @@ class L2pMOMENT(nn.Module):
             batchwise_prompt=config.batchwise_prompt,
             prompt_key_init=config.prompt_key_init,
         )
-
     def _update_inputs(
         self, config: Namespace | dict, **kwargs: dict
     ) -> NamespaceWithDefaults:
@@ -734,8 +733,8 @@ class L2pMOMENT(nn.Module):
             )
         elif task_name == TASKS.FORECASTING:
             num_patches = (
-                max(self.config.seq_len, self.config.patch_len) - self.config.patch_len
-            ) // self.config.patch_stride_len + 1
+                max(self.config.seq_len, self.config.patch_len) - self.config.patch_len 
+            ) // self.config.patch_stride_len + 1 + self.config.prompt_length*self.config.top_k
             self.head_nf = self.config.d_model * num_patches
             return ForecastingHead(
                 self.head_nf,
@@ -830,7 +829,6 @@ class L2pMOMENT(nn.Module):
         **kwargs,
     ) -> TimeseriesOutputs:
         batch_size, n_channels, _ = x_enc.shape
-
         if mask is None:
             mask = self.mask_generator.generate_mask(x=x_enc, input_mask=input_mask)
             mask = mask.to(x_enc.device)  # mask: [batch_size x seq_len]
@@ -957,18 +955,24 @@ class L2pMOMENT(nn.Module):
         self, x_enc: torch.Tensor, input_mask: torch.Tensor = None, **kwargs
     ) -> TimeseriesOutputs:
         batch_size, n_channels, seq_len = x_enc.shape
-
+        # print(f'input_mask:{input_mask.shape}')
+        # print(f'batch_size, n_channels, seq_len:{batch_size, n_channels, seq_len}')
         x_enc = self.normalizer(x=x_enc, mask=input_mask, mode="norm")
         x_enc = torch.nan_to_num(x_enc, nan=0, posinf=0, neginf=0)
 
         x_enc = self.tokenizer(x=x_enc)
         enc_in = self.patch_embedding(x_enc, mask=torch.ones_like(input_mask))
-
+        # ZYM：Prompt_mask即指定了某个Prompt，从而不用在Pool中选择TopK
+        prompt_mask = None
+        res = self.prompt(enc_in, prompt_mask=prompt_mask)
+        enc_in = res['prompted_embedding']
+        # print(f'enc_in: {enc_in.shape}')
         n_patches = enc_in.shape[2]
         enc_in = enc_in.reshape(
             (batch_size * n_channels, n_patches, self.config.d_model)
         )
-
+        # seq是512，那么加了Prompt len×stride  
+        input_mask= torch.ones(self.seq_len+self.config.patch_stride_len*self.prompt.length*self.config.top_k).repeat(batch_size, 1).to(x_enc.device)
         patch_view_mask = Masking.convert_seq_to_patch_view(input_mask, self.patch_len)
         attention_mask = patch_view_mask.repeat_interleave(n_channels, dim=0)
         outputs = self.encoder(inputs_embeds=enc_in, attention_mask=attention_mask)
@@ -1117,7 +1121,7 @@ class L2pMOMENT(nn.Module):
 
         logits = self.head(enc_out, input_mask=input_mask)
 
-        return TimeseriesOutputs(embeddings=enc_out, logits=logits, metadata=reduction, reduce_sim=reduce_sim)
+        return TimeseriesOutputs(embeddings=enc_out, logits=logits, metadata=reduction)
 
     def forward(
         self,

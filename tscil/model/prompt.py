@@ -18,6 +18,7 @@ class Prompt(nn.Module):
         self.batchwise_prompt = batchwise_prompt
 
         if self.prompt_pool:
+            # ZYM: embed_dim=config.d_model
             prompt_pool_shape = (pool_size, length, embed_dim)
             if prompt_init == 'zero':
                 self.prompt = nn.Parameter(torch.zeros(prompt_pool_shape))
@@ -49,24 +50,14 @@ class Prompt(nn.Module):
         out = dict()
         if self.prompt_pool:
             if self.embedding_key == 'mean':
-                x_embed_mean = torch.mean(x_embed, dim=1)
-            elif self.embedding_key == 'max':
-                x_embed_mean = torch.max(x_embed, dim=1)[0]
-            elif self.embedding_key == 'mean_max':
-                x_embed_mean = torch.max(x_embed, dim=1)[0] + 2 * torch.mean(x_embed, dim=1)
-            elif self.embedding_key == 'cls':
-                if cls_features is None:
-                    x_embed_mean = torch.max(x_embed, dim=1)[0] # B, C
-                else:
-                    x_embed_mean = cls_features
+                x_embed_mean = torch.mean(x_embed, dim=(2))  # 维度从[8,7,64,1024]变为 [8,7,1024]
             else:
                 raise NotImplementedError("Not supported way of calculating embedding keys!")
 
             prompt_norm = self.l2_normalize(self.prompt_key, dim=1) # Pool_size, C
             x_embed_norm = self.l2_normalize(x_embed_mean, dim=1) # B, C
-
-            similarity = torch.matmul(x_embed_norm, prompt_norm.t()) # B, Pool_size
             
+            similarity = torch.sum(torch.matmul(x_embed_norm, prompt_norm.t()).permute(0,2,1),dim=2) # B, Pool_size
             if prompt_mask is None:
                 _, idx = torch.topk(similarity, k=self.top_k, dim=1) # B, top_k
                 if self.batchwise_prompt:
@@ -85,7 +76,7 @@ class Prompt(nn.Module):
                 idx = prompt_mask # B, top_k
 
             batched_prompt_raw = self.prompt[idx] # B, top_k, length, C
-            batch_size, top_k, length, c = batched_prompt_raw.shape
+            batch_size, top_k,length, c = batched_prompt_raw.shape
             batched_prompt = batched_prompt_raw.reshape(batch_size, top_k * length, c) # B, top_k * length, C
 
             out['prompt_idx'] = idx
@@ -99,10 +90,12 @@ class Prompt(nn.Module):
             batched_key_norm = prompt_norm[idx] # B, top_k, C
             out['selected_key'] = batched_key_norm
             x_embed_norm = x_embed_norm.unsqueeze(1) # B, 1, C
-            sim = batched_key_norm * x_embed_norm # B, top_k, C
-            reduce_sim = torch.sum(sim) / x_embed.shape[0] # Scalar
 
-            out['reduce_sim'] = reduce_sim
+            # ZYM: reduce_sim 只有在classify有用
+            # sim = torch.matmul(x_embed_norm,batched_key_norm) # B, top_k, C
+            # print(f'sim: {sim.shape}')
+            # reduce_sim = torch.sum(sim) / x_embed.shape[0] # Scalar
+            # out['reduce_sim'] = reduce_sim
         else:
             if self.prompt_init == 'zero':
                 self.prompt = nn.Parameter(torch.zeros(self.length, self.embed_dim))
@@ -113,6 +106,8 @@ class Prompt(nn.Module):
         
         # The input with the prompt concatenated to the front. [B, prompt+token, C]
         out['total_prompt_len'] = batched_prompt.shape[1]
-        out['prompted_embedding'] = torch.cat([batched_prompt, x_embed], dim=1)
+        
+        batched_prompt=batched_prompt.unsqueeze(1).repeat(1,x_embed.shape[1], 1, 1)
+        out['prompted_embedding'] = torch.cat((batched_prompt, x_embed), dim=2)
 
         return out
