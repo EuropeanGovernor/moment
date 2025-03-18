@@ -214,9 +214,10 @@ class PatchEmbedding(nn.Module):
         self.dropout = nn.Dropout(patch_dropout)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        mask = Masking.convert_seq_to_patch_view(
-            mask, patch_len=self.patch_len
-        ).unsqueeze(-1)
+        # mask = Masking.convert_seq_to_patch_view(
+        #     mask, patch_len=self.patch_len
+        # ).unsqueeze(-1)
+        mask = mask.unsqueeze(-1)
         # mask : [batch_size x n_patches x 1]
         n_channels = x.shape[1]
         mask = (
