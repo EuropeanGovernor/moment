@@ -1,12 +1,5 @@
 import math
 import numpy as np
-import lightning as L
-from typing import Any, Optional
-from collections import defaultdict
-from peft import LoraConfig, LoraModel, get_peft_model, TaskType
-from jaxtyping import Bool, Float, Int
-from collections.abc import Callable, Sequence
-
 
 import torch
 from torch import nn
@@ -17,6 +10,7 @@ from torch.utils.data import DataLoader
 from torch.distributions import Distribution
 from torch.utils.tensorboard import SummaryWriter
 from head import ForecastingHead
+from transformers import T5Config
 from attention import T5EncoderModel_LoRA
 from EarlyStop import EarlyStopping
 
@@ -27,21 +21,15 @@ from tqdm import tqdm
 import argparse
 import warnings
 warnings.filterwarnings("ignore")
-from transformers import T5Config, T5EncoderModel, T5Model
-from transformers.models.t5.modeling_t5 import T5Attention, T5LayerSelfAttention, T5Stack
 os.chdir(os.path.dirname((os.getcwd())))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from momentfm.common import TASKS
-from momentfm import MOMENTPipeline
 from momentfm.utils.masking import Masking
-from momentfm.models.layers.revin import RevIN
-from momentfm.data.base import TimeseriesOutputs
 from momentfm.data.informer_dataset import InformerDataset 
 from momentfm.utils.forecasting_metrics import get_forecasting_metrics
-from momentfm.models.layers.embed import PatchEmbedding, Patching, PositionalEmbedding
+from momentfm.models.layers.embed import PatchEmbedding
 
-class MomentFinetune(L.LightningModule):
+class MomentFinetune():
     def __init__(self, args):
         super().__init__()
         self.dataset = args.dataset
