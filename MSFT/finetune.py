@@ -337,6 +337,9 @@ class MomentFinetune():
         step = 0 
         for epoch in range(self.max_epoch):
             self.model.train()
+            self.patch_embedding.train()
+            self.linear.train()
+            self.heads.train()
             losses = []
             for timeseries, forecast, input_mask in tqdm(self.dataloader["train"], total=len(self.dataloader["train"])):
                 step += 1
@@ -409,11 +412,14 @@ class MomentFinetune():
     def eval(self, cur_epoch, test=False):
         trues, preds, histories, losses = [], [], [], []
         self.model.eval()
+        self.patch_embedding.eval()
+        self.linear.eval()
+        self.heads.eval()
         if test: dataLoader = self.dataloader["test"]
         else: dataLoader = self.dataloader["val"]
 
         with torch.no_grad():
-            for timeseries, forecast, input_mask in tqdm(self.dataloader["train"], total=len(self.dataloader["train"])):
+            for timeseries, forecast, input_mask in tqdm(dataLoader, total=len(dataLoader)):
                 # 获取batch_size, n_channels
                 batch_size, n_channels, _ = timeseries.shape
 
