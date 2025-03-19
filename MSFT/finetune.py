@@ -74,7 +74,7 @@ class MomentFinetune():
                           }[self.pred_length]
 
         # 新模块参数
-        self.head_dropout = 0.1
+        self.head_dropout = args.head_dropout
         self.head_nf = [self.d_model * _ for _ in self.NUM_PATCH]
         self.scale_weights = nn.Parameter(torch.ones(4, device=self.device_name)) 
         self.linear = nn.ModuleList([nn.Linear(self.d_model, self.d_model) for _ in range(4)]).to(self.device_name) 
@@ -516,6 +516,7 @@ if __name__ == "__main__":
     parser.add_argument("--init_lr", type=float, default=1e-4, help="Initial learning rate (default is dataset-specific)")
     parser.add_argument("--scale_weight_lr", type=float, default=5e-5, help="Learning rate for scale weights")
     parser.add_argument("--pred_length", type=int, default=96, help="Prediction length")
+    parser.add_argument("--head_dropout", type=float, default=0.1, help="head_dropout")
     parser.add_argument("--note", type=str, default='')
     args = parser.parse_args()
     writer = SummaryWriter(log_dir=f"./runs/{args.note}")

@@ -8,4 +8,5 @@ python finetune.py \
     --max_epoch 3 \
     --scale_weight_lr 3e-3 \
     --pred_length 96 \
-    --note 'ETTh1_96_epoch3_lr_3e-3_wlr_3e-3'
+    --head_dropout 0.2 \
+    --note 'ETTh1_96_epoch3_lr_3e-3_wlr_3e-3_drop_0.2'

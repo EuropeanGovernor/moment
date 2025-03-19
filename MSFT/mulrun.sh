@@ -1,2 +1,2 @@
 bash run.sh
-bash run2.sh
+bash run_2.sh
