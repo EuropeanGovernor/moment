@@ -173,7 +173,7 @@ class MomentFinetune():
 
     def _get_dataloader(self):
         train_dataset = InformerDataset(data_split="train", random_seed=13, forecast_horizon=self.pred_length, full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
-        val_dataset = InformerDataset(data_split="test", random_seed=13, forecast_horizon=self.pred_length, full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
+        val_dataset = InformerDataset(data_split="val", random_seed=13, forecast_horizon=self.pred_length, full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
         test_dataset = InformerDataset(data_split="test", random_seed=13, forecast_horizon=self.pred_length, full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
 
         train_loader = DataLoader(train_dataset, batch_size=self.train_bs, num_workers=self.NumWorkers, shuffle=True, drop_last=True, pin_memory=True)
