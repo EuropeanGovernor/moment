@@ -43,6 +43,7 @@ class MomentFinetune():
         self.criterion = nn.MSELoss()
         self.scaler = GradScaler() 
         self.init_lr = args.init_lr
+        self.head_lr = args.head_lr
         self.scale_weight_lr = args.scale_weight_lr
         self.device_name = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -184,8 +185,11 @@ class MomentFinetune():
                     'params': itertools.chain(self.model.parameters(), 
                                 self.patch_embedding.parameters(),
                                 self.linear.parameters(),
-                                self.heads.parameters()),
                     'lr': self.init_lr, 
+                },
+                {
+                    'params':  self.heads.parameters(),
+                    'lr': self.head_lr
                 },
                 {
                     'params': self.scale_weights,
@@ -605,6 +609,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_bs", type=int, default=8, help="Batch size for evaluation")
     parser.add_argument("--max_epoch", type=int, default=3, help="Maximum number of training epochs")
     parser.add_argument("--init_lr", type=float, default=1e-4, help="Initial learning rate (default is dataset-specific)")
+    parser.add_argument("--head_lr", type=float, default=1e-4, help="Initial learning rate (default is dataset-specific)")
     parser.add_argument("--scale_weight_lr", type=float, default=5e-5, help="Learning rate for scale weights")
     parser.add_argument("--pred_length", type=int, default=96, help="Prediction length")
     parser.add_argument("--head_dropout", type=float, default=0.1, help="head_dropout")

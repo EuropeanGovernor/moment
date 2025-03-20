@@ -5,8 +5,9 @@ python finetune.py \
     --train_bs 4 \
     --eval_bs 4 \
     --init_lr 5e-5 \
+    --head_lr 1e-4 \
     --max_epoch 20 \
-    --scale_weight_lr 5e-5 \
+    --scale_weight_lr 1e-4 \
     --pred_length 96 \
     --patience 5 \
-    --note 'ETTh1_96_epoch20_lr_5e-5_wlr_5e-5'
+    --note 'ETTh1_96_epoch20_lr_5e-5_wlr_1e-4_hlr_1e-4'
