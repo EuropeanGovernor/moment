@@ -184,7 +184,7 @@ class MomentFinetune():
                 {
                     'params': itertools.chain(self.model.parameters(), 
                                 self.patch_embedding.parameters(),
-                                self.linear.parameters(),
+                                self.linear.parameters()),
                     'lr': self.init_lr, 
                 },
                 {
