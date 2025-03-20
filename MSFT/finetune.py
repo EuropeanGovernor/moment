@@ -39,6 +39,7 @@ class MomentFinetune():
         self.max_norm = 5.0
         self.NumWorkers = 4
         self.BestEvalLoss = float("inf")
+        self.patience = args.patience
         self.criterion = nn.MSELoss()
         self.scaler = GradScaler() 
         self.init_lr = args.init_lr
@@ -53,7 +54,13 @@ class MomentFinetune():
         self.patch_stride_len = 8
         self.scale_num_patch = {}
         self.mask_generator = Masking()
-
+        self.early_stopping = EarlyStopping(
+            patience=self.patience, 
+            verbose=True,
+            delta=0.0001,
+            path=f"{self.dataset}_{self.pred_length}_best_model.pth",
+            trace_func=print
+        )
         # model out后找到mask对应的位置
         self.SCALE_INDEX = {96:[
                 list(range(64, 76)),   # Scale 0: 从索引 64 到 75（12 个 Patch） 
@@ -129,9 +136,11 @@ class MomentFinetune():
         encoder_state_dict = {k.replace("encoder.", ""): v for k, v in self.checkpoint.items() if k.startswith("encoder.")}
         missing_keys, unexpected_keys = self.model.load_state_dict(encoder_state_dict, strict=False)
 
-        # print(f"✅ 成功加载参数: {encoder_state_dict.keys()-missing_keys}")
-        # print(f"❌ Checkpoint中没有的参数: {missing_keys}")
-        # print(f"⚠️ 模型中没有的参数: {unexpected_keys}")
+        self._get_embeder()
+
+        print(f"✅ 成功加载参数: {encoder_state_dict.keys()-missing_keys}")
+        print(f"❌ Checkpoint中没有的参数: {missing_keys}")
+        print(f"⚠️ 模型中没有的参数: {unexpected_keys}")
 
         self.model.to(self.device_name)
 
@@ -141,11 +150,25 @@ class MomentFinetune():
             if "SelfAttention.q" in name or "SelfAttention.k" in name or "SelfAttention.v" in name or "DenseReluDense" in name:
                 param.requires_grad = False
 
-        # print(self.model)
+        print(self.model)
+
         # 查看需训练参数
-        # for name, param in self.model.named_parameters():
-        #     if param.requires_grad:
-        #         print(name, param.shape)
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                print(name, param.shape)
+
+        for name, param in enumerate(self.patch_embedding.parameters()):
+            if param.requires_grad:
+                print(name, param.shape)
+
+        for i, param in enumerate(self.linear.parameters()):
+            if param.requires_grad:
+                print(f"linear_{i}", param.shape)
+
+        for i, param in enumerate(self.heads.parameters()):
+            if param.requires_grad:
+                print(f"heads_{i}", param.shape)
+
         
     def _get_lr_schedular(self):
         self.lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -407,19 +430,21 @@ class MomentFinetune():
                 writer.add_scalar(f'scale_weights/{num}', scale_weights[num], global_step=epoch)
 
             self.lr_scheduler.step()
-            self.eval(cur_epoch=epoch)
 
-    def eval(self, cur_epoch, test=False):
+            early_stop = self.eval(cur_epoch=epoch)
+            if early_stop:
+                print(f"Training stopped early at epoch {epoch+1}/{self.max_epoch}")
+                break
+
+    def eval(self, cur_epoch):
         trues, preds, histories, losses = [], [], [], []
         self.model.eval()
         self.patch_embedding.eval()
         self.linear.eval()
         self.heads.eval()
-        if test: dataLoader = self.dataloader["test"]
-        else: dataLoader = self.dataloader["val"]
-
+        
         with torch.no_grad():
-            for timeseries, forecast, input_mask in tqdm(dataLoader, total=len(dataLoader)):
+            for timeseries, forecast, input_mask in tqdm(self.dataloader["val"], total=len(self.dataloader["val"])):
                 # 获取batch_size, n_channels
                 batch_size, n_channels, _ = timeseries.shape
 
@@ -474,21 +499,88 @@ class MomentFinetune():
             
             metrics = get_forecasting_metrics(y=trues, y_hat=preds, reduction="mean")
 
-            mode = "Test" if test else "Val"
+            writer.add_scalar(f"Loss/Val", average_loss, global_step=cur_epoch)
+            writer.add_scalar(f"Val/MSE", metrics.mse, global_step=cur_epoch)
+            writer.add_scalar(f"Val/MAE", metrics.mae, global_step=cur_epoch)
 
-            writer.add_scalar(f"Loss/{mode}", average_loss, global_step=cur_epoch)
-            writer.add_scalar(f"{mode}/MSE", metrics.mse, global_step=cur_epoch)
-            writer.add_scalar(f"{mode}/MAE", metrics.mae, global_step=cur_epoch)
-            # writer.add_scalar(f"{mode}/MAPE", metrics.mape, global_step=cur_epoch)
-            # writer.add_scalar(f"{mode}/SMAPE", metrics.smape, global_step=cur_epoch)
-            # writer.add_scalar(f"{mode}/RMSE", metrics.rmse, global_step=cur_epoch)
-
-            
             if self.BestEvalLoss > average_loss:
                 self.BestEvalLoss = average_loss
-                self.eval(test=True, cur_epoch = cur_epoch)
+                self.test(cur_epoch)
                 self.save_model()
-    
+             
+            self.early_stopping(average_loss, self.model)
+            if self.early_stopping.early_stop:
+                print("Early stopping triggered")
+                return True  
+            
+            return False 
+    def test(self, cur_epoch):
+        trues, preds, histories, losses = [], [], [], []
+        self.model.eval()
+        self.patch_embedding.eval()
+        self.linear.eval()
+        self.heads.eval()
+        
+        with torch.no_grad():
+            for timeseries, forecast, input_mask in tqdm(self.dataloader["test"], total=len(self.dataloader["test"])):
+                # 获取batch_size, n_channels
+                batch_size, n_channels, _ = timeseries.shape
+
+                # 降采样得到数据和scale_ts/input_seq_mask/input_patch_mask (4 scale)
+                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast)
+                n_patches = sum([ _.shape[2] for _ in scale_ts])
+
+                # 获取patch_embedding和位置编码
+                input_embed = self.embed(scale_ts, input_patch_mask)
+
+                # 分不同尺度投影
+                output_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
+
+                # 创建mask embed
+                output_mask_embed = self.mask_embed(output_embed, input_patch_mask)
+
+                # 进入encoder之前拼接不同尺度
+                enc_in = torch.cat([_ for _ in output_mask_embed], dim=2)
+                enc_in = enc_in.reshape(batch_size*n_channels, n_patches,self.d_model).to(self.device_name)
+
+                attn_mask = torch.cat([_ for _ in input_patch_mask], dim=1)
+                attn_mask = attn_mask.unsqueeze(1).repeat(1, n_channels, 1)
+                attn_mask = attn_mask.reshape(batch_size*n_channels, n_patches).to(self.device_name)
+
+                with torch.amp.autocast(device_type='cuda'):
+                    output = self.model(inputs_embeds = enc_in, attention_mask = attn_mask.to(torch.bool))
+                
+                enc_out = output.last_hidden_state
+                enc_out = enc_out.reshape((-1, n_channels, n_patches, self.d_model))
+                mask_out = [enc_out[..., indices, :] for indices in self.SCALE_INDEX] 
+                head_out = [head(mask) for head, mask in zip(self.heads,mask_out)]
+
+                # upsampling
+                up_sampling = [self._upsample(head) for head in head_out]
+
+                weighted_forecast = 0
+                scale_weights = torch.softmax(self.scale_weights, dim=0)
+                for i, weight in enumerate(scale_weights):
+                    weighted_forecast += weight * up_sampling[i] 
+                
+                loss = self.criterion(weighted_forecast.float(), forecast.float().to(self.device_name))
+                losses.append(loss.item())
+                trues.append(forecast.detach().cpu().numpy())
+                preds.append(weighted_forecast.detach().cpu().numpy())
+                histories.append(timeseries.detach().cpu().numpy())
+
+            losses = np.array(losses)
+            average_loss = np.average(losses)
+            trues = np.concatenate(trues, axis=0)
+            preds = np.concatenate(preds, axis=0)
+            histories = np.concatenate(histories, axis=0)
+            
+            metrics = get_forecasting_metrics(y=trues, y_hat=preds, reduction="mean")
+
+            writer.add_scalar(f"Loss/Test", average_loss, global_step=cur_epoch)
+            writer.add_scalar(f"Test/MSE", metrics.mse, global_step=cur_epoch)
+            writer.add_scalar(f"Test/MAE", metrics.mae, global_step=cur_epoch)
+
     def save_model(self):
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
@@ -500,7 +592,6 @@ class MomentFinetune():
             torch.save(checkpoint, f)
     def main(self):
         self._build_model()
-        self._get_embeder()
         self._get_dataloader()
         self._get_optimizer()
         self._get_lr_schedular()
@@ -517,7 +608,9 @@ if __name__ == "__main__":
     parser.add_argument("--scale_weight_lr", type=float, default=5e-5, help="Learning rate for scale weights")
     parser.add_argument("--pred_length", type=int, default=96, help="Prediction length")
     parser.add_argument("--head_dropout", type=float, default=0.1, help="head_dropout")
+    parser.add_argument("--patience", type=int, default=5, help="patience")
     parser.add_argument("--note", type=str, default='')
     args = parser.parse_args()
     writer = SummaryWriter(log_dir=f"./runs/{args.note}")
     MomentFinetune(args).main()
+    writer.close()
