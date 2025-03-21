@@ -24,6 +24,7 @@ warnings.filterwarnings("ignore")
 os.chdir(os.path.dirname((os.getcwd())))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from momentfm.utils.utils import control_randomness
+from momentfm.models.layers.revin import RevIN
 from momentfm.utils.masking import Masking
 from momentfm.data.informer_dataset import InformerDataset 
 from momentfm.utils.forecasting_metrics import get_forecasting_metrics
@@ -132,6 +133,9 @@ class MomentFinetune():
                             use_cache=True,
                             vocab_size=32128
                         )
+        self.normalizer = RevIN(
+            num_features=1, affine=False
+        )
 
         if self.lora: self.model =  T5EncoderModel_LoRA(config,pred_length=self.pred_length).get_encoder()
         else: self.model =  T5EncoderModel(config).get_encoder()
@@ -213,7 +217,7 @@ class MomentFinetune():
         test_loader = DataLoader(test_dataset, batch_size=self.eval_bs, num_workers=self.NumWorkers, shuffle=True, drop_last=True, pin_memory=True)
         self.dataloader = {"train":train_loader, "val":val_loader, "test":test_loader}
 
-    def _downsample(self, timeseries, forecast) -> tuple:
+    def _downsample(self, timeseries, forecast, input_mask) -> tuple:
         """
         对时间序列和预测序列进行三次降采样
         
@@ -229,6 +233,9 @@ class MomentFinetune():
         batch_size, channel, context_length = timeseries.shape
         _, _, prediction_length = forecast.shape
         scale_ts, scale_fc, scale_seq_mask, scale_patch_mask = [], [], [], []
+
+        timeseries = self.normalizer(x=timeseries, mask=input_mask, mode="norm")
+        timeseries = torch.nan_to_num(timeseries, nan=0, posinf=0, neginf=0)
 
         new_context_length = context_length
         new_prediction_length = prediction_length
@@ -358,7 +365,7 @@ class MomentFinetune():
                 batch_size, n_channels, _ = timeseries.shape
 
                 # 降采样得到数据和scale_ts/input_seq_mask/input_patch_mask (4 scale)
-                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast)
+                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast, input_mask)
                 n_patches = sum([ _.shape[2] for _ in scale_ts])
 
                 # 获取patch_embedding和mask embedding和位置编码
@@ -433,7 +440,7 @@ class MomentFinetune():
                 batch_size, n_channels, _ = timeseries.shape
 
                 # 降采样得到数据和scale_ts/input_seq_mask/input_patch_mask (4 scale)
-                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast)
+                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast, input_mask)
                 n_patches = sum([ _.shape[2] for _ in scale_ts])
 
                 # 获取patch_embedding和mask embedding和位置编码
@@ -508,7 +515,7 @@ class MomentFinetune():
                 batch_size, n_channels, _ = timeseries.shape
 
                 # 降采样得到数据和scale_ts/input_seq_mask/input_patch_mask (4 scale)
-                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast)
+                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast, input_mask)
                 n_patches = sum([ _.shape[2] for _ in scale_ts])
 
                 # 获取patch_embedding和mask embedding和位置编码
