@@ -1,5 +1,5 @@
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 python finetune.py \
     --dataset ETTh1 \
     --train_bs 4 \
@@ -12,4 +12,4 @@ python finetune.py \
     --scale_weight_lr 1e-4 \
     --pred_length 96 \
     --patience 5 \
-    --note 'wolinear_ETTh1_96_epoch20_lr_1e-3_wlr_1e-4_hlr_1e-3'
+    --note 'wolinear_wallnorm_ETTh1_96_epoch20_lr_1e-3_wlr_1e-4_hlr_1e-3'

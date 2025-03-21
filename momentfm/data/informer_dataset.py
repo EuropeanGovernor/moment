@@ -19,7 +19,7 @@ class InformerDataset:
         data_stride_len: int = 1,
         task_name: str = "forecasting",
         random_seed: int = 42,
-        full_file_path_and_name="./long_term_forecast/ETT-small/ETTh1.csv",
+        full_file_path_and_name="../long_term_forecast/ETT-small/ETTh1.csv",
         scale = True,
         target_col : Optional[str] = "OT",
         train_ratio: float = 0.6,

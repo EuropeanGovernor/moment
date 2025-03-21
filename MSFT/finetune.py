@@ -389,8 +389,9 @@ class MomentFinetune():
                     enc_out = enc_out.reshape((-1, n_channels, n_patches, self.d_model))
                     mask_out = [enc_out[..., indices, :] for indices in self.SCALE_INDEX] 
                     head_out = [head(mask) for head, mask in zip(self.heads,mask_out)]
+                    denorm_out = [self.normalizer(x=_.to(self.device_name), mode="denorm") for _ in head_out]
 
-                    loss = self.cal_scale_loss(head_out, scale_fc, step)
+                    loss = self.cal_scale_loss(denorm_out, scale_fc, step)
 
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
@@ -464,9 +465,10 @@ class MomentFinetune():
                 enc_out = enc_out.reshape((-1, n_channels, n_patches, self.d_model))
                 mask_out = [enc_out[..., indices, :] for indices in self.SCALE_INDEX] 
                 head_out = [head(mask) for head, mask in zip(self.heads,mask_out)]
+                denorm_out = [self.normalizer(x=_, mode="denorm") for _ in head_out]
 
                 # upsampling
-                up_sampling = [self._upsample(head) for head in head_out]
+                up_sampling = [self._upsample(head) for head in denorm_out]
 
                 weighted_forecast = 0
                 scale_weights = torch.softmax(self.scale_weights, dim=0)
@@ -539,9 +541,10 @@ class MomentFinetune():
                 enc_out = enc_out.reshape((-1, n_channels, n_patches, self.d_model))
                 mask_out = [enc_out[..., indices, :] for indices in self.SCALE_INDEX] 
                 head_out = [head(mask) for head, mask in zip(self.heads,mask_out)]
+                denorm_out = [self.normalizer(x=_, mode="denorm") for _ in head_out]
 
                 # upsampling
-                up_sampling = [self._upsample(head) for head in head_out]
+                up_sampling = [self._upsample(head) for head in denorm_out]
 
                 weighted_forecast = 0
                 scale_weights = torch.softmax(self.scale_weights, dim=0)

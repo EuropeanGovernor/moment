@@ -80,6 +80,6 @@ class RevIN(nn.Module):
         if self.affine:
             x = x - self.affine_bias
             x = x / (self.affine_weight + self.eps * self.eps)
-        x = x * self.stdev
-        x = x + self.mean
+        x = x * self.stdev.to(x.device)
+        x = x + self.mean.to(x.device)
         return x
