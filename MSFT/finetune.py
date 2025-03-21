@@ -11,7 +11,7 @@ from torch.distributions import Distribution
 from torch.utils.tensorboard import SummaryWriter
 from head import ForecastingHead
 from transformers import T5Config
-from attention import T5EncoderModel_LoRA
+from attention import T5EncoderModel_LoRA, T5EncoderModel
 from EarlyStop import EarlyStopping
 
 import os
@@ -23,11 +23,12 @@ import warnings
 warnings.filterwarnings("ignore")
 os.chdir(os.path.dirname((os.getcwd())))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from momentfm.utils.utils import control_randomness
 from momentfm.utils.masking import Masking
 from momentfm.data.informer_dataset import InformerDataset 
 from momentfm.utils.forecasting_metrics import get_forecasting_metrics
 from momentfm.models.layers.embed import PatchEmbedding
+control_randomness(seed=13) 
 
 class MomentFinetune():
     def __init__(self, args):
@@ -82,6 +83,8 @@ class MomentFinetune():
                           }[self.pred_length]
 
         # 新模块参数
+        self.lora = args.lora
+        self.linr = args.linear
         self.head_dropout = args.head_dropout
         self.head_nf = [self.d_model * _ for _ in self.NUM_PATCH]
         self.scale_weights = nn.Parameter(torch.ones(4, device=self.device_name)) 
@@ -130,7 +133,9 @@ class MomentFinetune():
                             vocab_size=32128
                         )
 
-        self.model =  T5EncoderModel_LoRA(config,pred_length=self.pred_length).get_encoder()
+        if self.lora: self.model =  T5EncoderModel_LoRA(config,pred_length=self.pred_length).get_encoder()
+        else: self.model =  T5EncoderModel(config).get_encoder()
+
         checkpoint_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),f"MOMENT_{self.pred_length}.ckpt")
         self.checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
@@ -268,7 +273,7 @@ class MomentFinetune():
         
     def _upsample(self,  input_tensor) -> tuple:
         batch_size, n_channel, length = input_tensor.shape
-
+        
         factor = self.pred_length // length
         upsampled_tensor = input_tensor.repeat_interleave(factor, dim=2)
         return upsampled_tensor
@@ -304,28 +309,6 @@ class MomentFinetune():
         input_embed = [self.patch_embedding(_, input_mask).to(self.device_name) for _, input_mask in zip(x, input_masks)]
         return input_embed        
     
-    def mask_embed(self, embed, input_patch_mask):
-        # 生成mask embedding
-        # embed: List{ [batch_size, channel, num_patch, d_model]}
-        # input_patch_mask: List{ [batch_size, num_patch]}
-        masked_embed = []
-        for _, patch_mask in zip(embed, input_patch_mask):
-            batch_size, n_channels, n_patches, d_model = _.shape
-            
-            # 生成随机噪声（范围在[0, 1]之间），形状和 _ 相同
-            noise = torch.rand_like(_).to(self.device_name)  # [batch_size, n_channels, n_patches, d_model]
-            
-            # 将 input_patch_mask 扩展到与 _ 相同的形状
-            # input_patch_mask 的形状是 [batch_size, n_patches]，需要扩展为 [batch_size, n_channels, n_patches, 1]
-            patch_mask = patch_mask.unsqueeze(1).unsqueeze(-1).to(self.device_name)  # [batch_size, 1, n_patches, 1]
-            patch_mask = patch_mask.repeat(1, n_channels, 1, d_model)  # [batch_size, n_channels, n_patches, d_model]
-            
-            # 使用 input_patch_mask 来决定哪些位置是保留原始 embedding，哪些位置是用噪声替代
-            # 如果 input_patch_mask 中的某个位置为 0，则将该位置替换为噪声
-            masked_embed.append(patch_mask * _ + (1 - patch_mask) * noise)
-        
-        return masked_embed
-        
     def cal_scale_loss(self, scale_ts, scale_fc, step):
         """
         计算不同尺度的损失并加权求和。
@@ -378,17 +361,14 @@ class MomentFinetune():
                 scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast)
                 n_patches = sum([ _.shape[2] for _ in scale_ts])
 
-                # 获取patch_embedding和位置编码
+                # 获取patch_embedding和mask embedding和位置编码
                 input_embed = self.embed(scale_ts, input_patch_mask)
 
                 # 分不同尺度投影
-                output_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
-
-                # 为待预测部分加上随机噪声成为mask
-                output_mask_embed = self.mask_embed(output_embed, input_patch_mask)
+                if self.linr: input_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
 
                 # 进入encoder之前拼接不同尺度
-                enc_in = torch.cat([_ for _ in output_mask_embed], dim=2)
+                enc_in = torch.cat([_ for _ in input_embed], dim=2)
                 enc_in = enc_in.reshape(batch_size*n_channels, n_patches,self.d_model).to(self.device_name)
 
                 attn_mask = torch.cat([_ for _ in input_patch_mask], dim=1)
@@ -407,7 +387,7 @@ class MomentFinetune():
 
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                del input_embed, output_embed, output_mask_embed, enc_in, attn_mask, output, enc_out, mask_out, head_out
+
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_norm)
                 torch.nn.utils.clip_grad_norm_(self.linear.parameters(), self.max_norm)
                 torch.nn.utils.clip_grad_norm_(self.heads.parameters(), self.max_norm)
@@ -456,17 +436,14 @@ class MomentFinetune():
                 scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast)
                 n_patches = sum([ _.shape[2] for _ in scale_ts])
 
-                # 获取patch_embedding和位置编码
+                # 获取patch_embedding和mask embedding和位置编码
                 input_embed = self.embed(scale_ts, input_patch_mask)
 
                 # 分不同尺度投影
-                output_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
-
-                # 创建mask embed
-                output_mask_embed = self.mask_embed(output_embed, input_patch_mask)
+                if self.linr: input_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
 
                 # 进入encoder之前拼接不同尺度
-                enc_in = torch.cat([_ for _ in output_mask_embed], dim=2)
+                enc_in = torch.cat([_ for _ in input_embed], dim=2)
                 enc_in = enc_in.reshape(batch_size*n_channels, n_patches,self.d_model).to(self.device_name)
 
                 attn_mask = torch.cat([_ for _ in input_patch_mask], dim=1)
@@ -534,17 +511,14 @@ class MomentFinetune():
                 scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast)
                 n_patches = sum([ _.shape[2] for _ in scale_ts])
 
-                # 获取patch_embedding和位置编码
+                # 获取patch_embedding和mask embedding和位置编码
                 input_embed = self.embed(scale_ts, input_patch_mask)
 
                 # 分不同尺度投影
-                output_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
-
-                # 创建mask embed
-                output_mask_embed = self.mask_embed(output_embed, input_patch_mask)
+                if self.linr: input_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
 
                 # 进入encoder之前拼接不同尺度
-                enc_in = torch.cat([_ for _ in output_mask_embed], dim=2)
+                enc_in = torch.cat([_ for _ in input_embed], dim=2)
                 enc_in = enc_in.reshape(batch_size*n_channels, n_patches,self.d_model).to(self.device_name)
 
                 attn_mask = torch.cat([_ for _ in input_patch_mask], dim=1)
@@ -612,6 +586,8 @@ if __name__ == "__main__":
     parser.add_argument("--head_lr", type=float, default=1e-4, help="Initial learning rate (default is dataset-specific)")
     parser.add_argument("--scale_weight_lr", type=float, default=5e-5, help="Learning rate for scale weights")
     parser.add_argument("--pred_length", type=int, default=96, help="Prediction length")
+    parser.add_argument("--lora", type=lambda x: x.lower() == "true", default=True)
+    parser.add_argument("--linear", type=lambda x: x.lower() == "true", default=True)
     parser.add_argument("--head_dropout", type=float, default=0.1, help="head_dropout")
     parser.add_argument("--patience", type=int, default=5, help="patience")
     parser.add_argument("--note", type=str, default='')

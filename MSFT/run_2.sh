@@ -1,12 +1,15 @@
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=0 
+export CUDA_VISIBLE_DEVICES=1
 python finetune.py \
     --dataset ETTh1 \
     --train_bs 4 \
     --eval_bs 4 \
-    --init_lr 3e-3 \
-    --max_epoch 3 \
-    --scale_weight_lr 3e-3 \
+    --init_lr 1e-3 \
+    --head_lr 1e-3 \
+    --max_epoch 20 \
+    --lora True \
+    --linear False \
+    --scale_weight_lr 1e-5 \
     --pred_length 96 \
-    --head_dropout 0.1 \
-    --note 'ETTh1_96_epoch3_lr_3e-3_wlr_3e-3_drop_0.1'
+    --patience 5 \
+    --note 'wolinear_ETTh1_96_epoch20_lr_1e-3_wlr_1e-5_hlr_1e-3'
