@@ -47,6 +47,7 @@ class MomentFinetune():
         self.init_lr = args.init_lr
         self.head_lr = args.head_lr
         self.scale_weight_lr = args.scale_weight_lr
+        self.weight_decay = args.weight_decay
         self.device_name = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.d_model = 1024
@@ -195,14 +196,17 @@ class MomentFinetune():
                                 self.patch_embedding.parameters(),
                                 self.linear.parameters()),
                     'lr': self.init_lr, 
+                    'weight_decay': self.weight_decay
                 },
                 {
                     'params':  self.heads.parameters(),
-                    'lr': self.head_lr
+                    'lr': self.head_lr,
+                    'weight_decay': self.weight_decay
                 },
                 {
                     'params': self.scale_weights,
-                    'lr': self.scale_weight_lr
+                    'lr': self.scale_weight_lr,
+                    'weight_decay': self.weight_decay
                 }
             ]
         )
@@ -212,9 +216,9 @@ class MomentFinetune():
         val_dataset = InformerDataset(data_split="val", random_seed=13, forecast_horizon=self.pred_length, full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
         test_dataset = InformerDataset(data_split="test", random_seed=13, forecast_horizon=self.pred_length, full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
 
-        train_loader = DataLoader(train_dataset, batch_size=self.train_bs, num_workers=self.NumWorkers, shuffle=True, drop_last=True, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=self.eval_bs, num_workers=self.NumWorkers, shuffle=True, drop_last=True,  pin_memory=True)
-        test_loader = DataLoader(test_dataset, batch_size=self.eval_bs, num_workers=self.NumWorkers, shuffle=True, drop_last=True, pin_memory=True)
+        train_loader = DataLoader(train_dataset, batch_size=self.train_bs, num_workers=self.NumWorkers, shuffle=True, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=self.eval_bs, num_workers=self.NumWorkers, shuffle=True, pin_memory=True)
+        test_loader = DataLoader(test_dataset, batch_size=self.eval_bs, num_workers=self.NumWorkers, shuffle=True, pin_memory=True)
         self.dataloader = {"train":train_loader, "val":val_loader, "test":test_loader}
 
     def _downsample(self, timeseries, forecast, input_mask) -> tuple:
@@ -328,12 +332,11 @@ class MomentFinetune():
         L = 0.0  # 初始化总损失
         scale_weights = torch.softmax(self.scale_weights.float(), dim=0)  # 确保权重为 float32
 
-        # 遍历每个尺度的预测和真实值
         for i, (ts, fc) in enumerate(zip(scale_ts, scale_fc)):
-            ts, fc = ts.to(self.device_name).float(), fc.to(self.device_name).float()  # 确保数据类型一致
-            scale_loss = self.criterion(ts, fc)  # 计算当前尺度的损失
-            L += scale_loss * scale_weights[i]  # 加权求和
-
+            ts, fc = ts.to(self.device_name, dtype=torch.float16), fc.to(self.device_name, dtype=torch.float16)
+            scale_loss = self.criterion(ts, fc)
+            L += scale_loss * scale_weights[i]
+    
             # 将当前尺度的损失记录到历史中
             self.scale_loss_history[i].append(scale_loss.item())
 
@@ -598,6 +601,7 @@ if __name__ == "__main__":
     parser.add_argument("--pred_length", type=int, default=96, help="Prediction length")
     parser.add_argument("--lora", type=lambda x: x.lower() == "true", default=True)
     parser.add_argument("--linear", type=lambda x: x.lower() == "true", default=True)
+    parser.add_argument("--weight_decay", type=float, default=0)
     parser.add_argument("--head_dropout", type=float, default=0.1, help="head_dropout")
     parser.add_argument("--patience", type=int, default=5, help="patience")
     parser.add_argument("--note", type=str, default='')
