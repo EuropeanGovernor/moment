@@ -184,7 +184,7 @@ class MomentFinetune():
     def _get_lr_schedular(self):
         self.lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optimizer=self.optimizer,
-                max_lr= self.init_lr,
+                max_lr= [self.init_lr , self.head_lr , self.scale_weight_lr],
                 epochs=self.max_epoch,
                 steps_per_epoch=len(self.dataloader["train"]),
             )
