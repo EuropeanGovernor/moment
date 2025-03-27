@@ -18,14 +18,13 @@ class T5Attention_LoRA(T5Attention):
         self.num_new_scales = num_new_scales
         self.r = r  # LoRA 的低秩维度
         self.alpha = alpha  # LoRA 缩放因子
-        
         for i in range(1 + self.num_new_scales):
             self.register_parameter(f"Q_A_{i}", nn.Parameter(torch.randn((self.r, self.d_model)) * 0.01))
-            self.register_parameter(f"Q_B_{i}", nn.Parameter(torch.zeros((self.d_model, self.r))))
+            self.register_parameter(f"Q_B_{i}", nn.Parameter(torch.zeros((self.d_model if self.d_model!=512 else 384, self.r))))
             self.register_parameter(f"K_A_{i}", nn.Parameter(torch.randn((self.r, self.d_model)) * 0.01))
-            self.register_parameter(f"K_B_{i}", nn.Parameter(torch.zeros((self.d_model, self.r))))
+            self.register_parameter(f"K_B_{i}", nn.Parameter(torch.zeros((self.d_model if self.d_model!=512 else 384, self.r))))
             self.register_parameter(f"V_A_{i}", nn.Parameter(torch.randn((self.r, self.d_model)) * 0.01))
-            self.register_parameter(f"V_B_{i}", nn.Parameter(torch.zeros((self.d_model, self.r))))
+            self.register_parameter(f"V_B_{i}", nn.Parameter(torch.zeros((self.d_model if self.d_model!=512 else 384, self.r))))
 
     def apply_lora(self, input: torch.Tensor, layer: nn.Linear, A: nn.Parameter, B: nn.Parameter):
         """
@@ -53,9 +52,9 @@ class T5Attention_LoRA(T5Attention):
         batch_size, seq_length, _ = hidden_states.shape
 
         # 初始化 updated_query, updated_key, 和 updated_value
-        updated_query = hidden_states.clone()
-        updated_key = hidden_states.clone()
-        updated_value = hidden_states.clone()
+        updated_query = self.k(hidden_states.clone()).float()
+        updated_key = self.q(hidden_states.clone()).float()
+        updated_value = self.v(hidden_states.clone()).float()
 
         if self.num_new_scales is not None:
             self.SCALE_INDEX = {96:[
