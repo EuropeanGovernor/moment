@@ -58,13 +58,13 @@ class T5Attention_LoRA(T5Attention):
 
         if self.num_new_scales is not None:
             self.SCALE_INDEX = {96:[
-                list(range(1, 76)),   # Scale 0: 从索引 64 到 75（12 个 Patch） 
+                list(range(0, 76)),   # Scale 0: 从索引 64 到 75（12 个 Patch） 
                 list(range(76, 114)), # Scale 1: 从索引 108 到 113（6 个 Patch）
                 list(range(114, 133)), # Scale 2: 从索引 130 到 132（3 个 Patch）
                 list(range(133, 143))  # Scale 3: 从索引 141 到 142（2 个 Patch）
                 ],
                             192:[
-                list(range(1, 88)),
+                list(range(0, 88)),
                 list(range(88, 132)),
                 list(range(132, 153)),
                 list(range(153, 164))
