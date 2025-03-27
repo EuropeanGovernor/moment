@@ -68,7 +68,19 @@ class T5Attention_LoRA(T5Attention):
                 list(range(88, 132)),
                 list(range(132, 153)),
                 list(range(153, 164))
-                ]}[self.pred_length]
+                ],
+                            336: [
+                list(range(64, 112)), 
+                list(range(128, 152)), 
+                list(range(160, 172)),
+                list(range(180, 186))  
+                ],
+                            720: [
+                list(range(64, 160)),
+                list(range(180, 228)),
+                list(range(240, 264)),
+                list(range(280, 292)) 
+            ]}[self.pred_length]
             
             for i in range(1+self.num_new_scales):
                 index = self.SCALE_INDEX[i]
