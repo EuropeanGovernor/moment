@@ -371,11 +371,15 @@ class MomentFinetune():
                 scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast, input_mask)
                 n_patches = sum([ _.shape[2] for _ in scale_ts])
 
-                # 获取patch_embedding和mask embedding和位置编码
+                # 先Embedding（含Mask Embedding），再投影
                 input_embed = self.embed(scale_ts, input_patch_mask)
+                # input_embed = self.embed(scale_ts, [torch.ones_like(_) for _ in input_patch_mask])
 
                 # 分不同尺度投影
                 if self.linr: input_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
+
+                # 先Embedding（不含Mask Embedding），然后投影，再Mask Embedding
+                # input_embed = [self.patch_embedding.apply_mask_embedding(_, input_mask).to(self.device_name) for _, input_mask in zip(input_embed, input_patch_mask)]
 
                 # 进入encoder之前拼接不同尺度
                 enc_in = torch.cat([_ for _ in input_embed], dim=2)
@@ -447,11 +451,16 @@ class MomentFinetune():
                 scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast, input_mask)
                 n_patches = sum([ _.shape[2] for _ in scale_ts])
 
-                # 获取patch_embedding和mask embedding和位置编码
+                # 先Embedding（含Mask Embedding），再投影
                 input_embed = self.embed(scale_ts, input_patch_mask)
+                # input_embed = self.embed(scale_ts, [torch.ones_like(_) for _ in input_patch_mask])
+
 
                 # 分不同尺度投影
                 if self.linr: input_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
+
+                # 先Embedding（不含Mask Embedding），然后投影，再Mask Embedding
+                # input_embed = [self.patch_embedding.apply_mask_embedding(_, input_mask).to(self.device_name) for _, input_mask in zip(input_embed, input_patch_mask)]
 
                 # 进入encoder之前拼接不同尺度
                 enc_in = torch.cat([_ for _ in input_embed], dim=2)
@@ -523,11 +532,15 @@ class MomentFinetune():
                 scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast, input_mask)
                 n_patches = sum([ _.shape[2] for _ in scale_ts])
 
-                # 获取patch_embedding和mask embedding和位置编码
+                # 先Embedding（含Mask Embedding），再投影
                 input_embed = self.embed(scale_ts, input_patch_mask)
+                # input_embed = self.embed(scale_ts, [torch.ones_like(_) for _ in input_patch_mask])
 
                 # 分不同尺度投影
                 if self.linr: input_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
+
+                # 先Embedding（不含Mask Embedding），然后投影，再Mask Embedding
+                # input_embed = [self.patch_embedding.apply_mask_embedding(_, input_mask).to(self.device_name) for _, input_mask in zip(input_embed, input_patch_mask)]
 
                 # 进入encoder之前拼接不同尺度
                 enc_in = torch.cat([_ for _ in input_embed], dim=2)
@@ -606,6 +619,6 @@ if __name__ == "__main__":
     parser.add_argument("--patience", type=int, default=5, help="patience")
     parser.add_argument("--note", type=str, default='')
     args = parser.parse_args()
-    writer = SummaryWriter(log_dir=f"./runs/{args.note}")
+    writer = SummaryWriter(log_dir=f"../tf-logs/runs/{args.note}")
     MomentFinetune(args).main()
     writer.close()
