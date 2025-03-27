@@ -50,7 +50,8 @@ class MomentFinetune():
         self.weight_decay = args.weight_decay
         self.device_name = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.d_model = 1024
+        self.model_name = args.version
+        self.d_model = {"small":512, "base":768, "large":1024}[self.model_name]
         self.seq_len = 512
         self.patch_size = 8
         self.ds_factor = 2 
@@ -108,9 +109,9 @@ class MomentFinetune():
         config = T5Config(
                             architectures=["T5ForConditionalGeneration"],
                             classifier_dropout=0.0,
-                            d_ff=2816,
+                            d_ff={"small":1024, "base":2048, "large":2816}[self.model_name],
                             d_kv=64,
-                            d_model=1024,
+                            d_model={"small":512, "base":768, "large":1024}[self.model_name],
                             decoder_start_token_id=0,
                             dense_act_fn="gelu_new",
                             dropout_rate=0.1,
@@ -122,9 +123,9 @@ class MomentFinetune():
                             layer_norm_epsilon=1e-06,
                             model_type="t5",
                             n_positions=512,
-                            num_decoder_layers=24,
-                            num_heads=16,
-                            num_layers=24,
+                            num_decoder_layers={"small":8, "base":12, "large":24}[self.model_name],
+                            num_heads={"small":6, "base":12, "large":16}[self.model_name],
+                            num_layers={"small":8, "base":12, "large":24}[self.model_name],
                             output_past=True,
                             pad_token_id=0,
                             relative_attention_max_distance=128,
@@ -141,7 +142,7 @@ class MomentFinetune():
         if self.lora: self.model =  T5EncoderModel_LoRA(config,pred_length=self.pred_length).get_encoder()
         else: self.model =  T5EncoderModel(config).get_encoder()
 
-        checkpoint_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),f"MOMENT_{self.pred_length}.ckpt")
+        checkpoint_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),f"MOMENT_{self.model_name}_{self.pred_length}.ckpt")
         self.checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
         encoder_state_dict = {k.replace("encoder.", ""): v for k, v in self.checkpoint.items() if k.startswith("encoder.")}
@@ -617,6 +618,7 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=0)
     parser.add_argument("--head_dropout", type=float, default=0.1, help="head_dropout")
     parser.add_argument("--patience", type=int, default=5, help="patience")
+    parser.add_argument("--version", type=str, default="small", help="")
     parser.add_argument("--note", type=str, default='')
     args = parser.parse_args()
     writer = SummaryWriter(log_dir=f"../tf-logs/runs/{args.note}")
