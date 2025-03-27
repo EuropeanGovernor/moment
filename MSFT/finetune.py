@@ -111,7 +111,7 @@ class MomentFinetune():
                             classifier_dropout=0.0,
                             d_ff={"small":1024, "base":2048, "large":2816}[self.model_name],
                             d_kv=64,
-                            d_model={"small":512, "base":768, "large":1024}[self.model_name],
+                            d_model={"small":384, "base":768, "large":1024}[self.model_name],
                             decoder_start_token_id=0,
                             dense_act_fn="gelu_new",
                             dropout_rate=0.1,
@@ -138,7 +138,7 @@ class MomentFinetune():
         self.normalizer = RevIN(
             num_features=1, affine=False
         )
-
+        print(config)
         if self.lora: self.model =  T5EncoderModel_LoRA(config,pred_length=self.pred_length).get_encoder()
         else: self.model =  T5EncoderModel(config).get_encoder()
 
