@@ -52,9 +52,9 @@ class T5Attention_LoRA(T5Attention):
         batch_size, seq_length, _ = hidden_states.shape
 
         # 初始化 updated_query, updated_key, 和 updated_value
-        updated_query = self.q(hidden_states.clone()).float()
-        updated_key = self.k(hidden_states.clone()).float()
-        updated_value = self.v(hidden_states.clone()).float()
+        updated_query = hidden_states.clone()
+        updated_key = hidden_states.clone()
+        updated_value = hidden_states.clone()
 
         if self.num_new_scales is not None:
             self.SCALE_INDEX = {96:[
@@ -81,7 +81,8 @@ class T5Attention_LoRA(T5Attention):
                 list(range(240, 264)),
                 list(range(280, 292)) 
             ]}[self.pred_length]
-            
+
+            query_scales, key_scales, value_scales = [], [], []
             for i in range(1+self.num_new_scales):
                 index = self.SCALE_INDEX[i]
                 query_scale = hidden_states[..., index, :]
@@ -96,9 +97,14 @@ class T5Attention_LoRA(T5Attention):
                 V_A = getattr(self, f"V_A_{i}")
                 V_B = getattr(self, f"V_B_{i}")
 
-                updated_query[..., index, :] = self.apply_lora(query_scale, self.q, Q_A, Q_B)
-                updated_key[..., index, :] = self.apply_lora(key_scale, self.k, K_A, K_B)
-                updated_value[..., index, :] = self.apply_lora(value_scale, self.v, V_A, V_B)
+                query_scales.append(self.apply_lora(query_scale, self.q, Q_A, Q_B))
+                key_scales.append(self.apply_lora(key_scale, self.k, K_A, K_B))
+                value_scales.append(self.apply_lora(value_scale, self.v, V_A, V_B))
+    
+            updated_query = torch.cat(query_scales, dim=-2)
+            updated_key = torch.cat(key_scales, dim=-2)
+            updated_value = torch.cat(value_scales, dim=-2)
+
 
         else:
             # No LoRA, use original projections
