@@ -57,29 +57,30 @@ class T5Attention_LoRA(T5Attention):
         updated_value = hidden_states.clone()
 
         if self.num_new_scales is not None:
-            self.SCALE_INDEX = {96:[
-                list(range(0, 76)),   # Scale 0: 从索引 64 到 75（12 个 Patch） 
-                list(range(76, 114)), # Scale 1: 从索引 108 到 113（6 个 Patch）
-                list(range(114, 133)), # Scale 2: 从索引 130 到 132（3 个 Patch）
-                list(range(133, 143))  # Scale 3: 从索引 141 到 142（2 个 Patch）
-                ],
-                            192:[
-                list(range(0, 88)),
-                list(range(88, 132)),
-                list(range(132, 153)),
-                list(range(153, 164))
-                ],
-                            336: [
-                list(range(64, 112)), 
-                list(range(128, 152)), 
-                list(range(160, 172)),
-                list(range(180, 186))  
-                ],
-                            720: [
-                list(range(64, 160)),
-                list(range(180, 228)),
-                list(range(240, 264)),
-                list(range(280, 292)) 
+            self.SCALE_INDEX = {
+            96: [
+                list(range(64, 76)),    # Scale 0: 12 patches
+                list(range(108, 114)),   # Scale 1: 6 patches
+                list(range(130, 133)),   # Scale 2: 3 patches
+                list(range(141, 143))    # Scale 3: 2 patches
+            ],
+            192: [
+                list(range(64, 88)),     # Scale 0: 24 patches
+                list(range(120, 132)),   # Scale 1: 12 patches
+                list(range(148, 154)),   # Scale 2: 6 patches
+                list(range(162, 166))    # Scale 3: 4 patches
+            ],
+            336: [
+                list(range(64, 106)),    # Scale 0: 42 patches
+                list(range(138, 159)),    # Scale 1: 21 patches
+                list(range(175, 187)),    # Scale 2: 12 patches
+                list(range(195, 201))     # Scale 3: 6 patches
+            ],
+            720: [
+                list(range(64, 154)),    # Scale 0: 90 patches
+                list(range(186, 231)),    # Scale 1: 45 patches
+                list(range(247, 270)),    # Scale 2: 23 patches
+                list(range(278, 290))     # Scale 3: 12 patches
             ]}[self.pred_length]
 
             query_scales, key_scales, value_scales = [], [], []
