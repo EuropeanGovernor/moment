@@ -78,11 +78,25 @@ class MomentFinetune():
                 list(range(120, 132)),
                 list(range(148, 154)),
                 list(range(162, 165))
-                ]}[self.pred_length]
+                ],
+                            336: [
+                list(range(64, 112)), 
+                list(range(128, 152)), 
+                list(range(160, 172)),
+                list(range(180, 186))  
+                ],
+                            720: [
+                list(range(64, 160)),
+                list(range(180, 228)),
+                list(range(240, 264)),
+                list(range(280, 292)) 
+            ]}[self.pred_length]
         
         # 不同pred length对应的mask所占patch长度
         self.NUM_PATCH = {96:[12, 6, 3, 2],
-                          192:[24, 12, 6, 3]
+                          192:[24, 12, 6, 3],
+                          192:[48, 24, 12, 6],
+                          192:[96, 48, 24, 12]
                           }[self.pred_length]
 
         # 新模块参数
