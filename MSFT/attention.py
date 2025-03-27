@@ -52,8 +52,8 @@ class T5Attention_LoRA(T5Attention):
         batch_size, seq_length, _ = hidden_states.shape
 
         # 初始化 updated_query, updated_key, 和 updated_value
-        updated_query = self.k(hidden_states.clone()).float()
-        updated_key = self.q(hidden_states.clone()).float()
+        updated_query = self.q(hidden_states.clone()).float()
+        updated_key = self.k(hidden_states.clone()).float()
         updated_value = self.v(hidden_states.clone()).float()
 
         if self.num_new_scales is not None:
