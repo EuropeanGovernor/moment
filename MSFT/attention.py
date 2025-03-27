@@ -126,6 +126,9 @@ class T5Attention_LoRA(T5Attention):
                 )
             else:
                 position_bias = self.compute_bias(seq_length, seq_length, device=scores.device)
+            
+            if mask is not None:
+                position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
 
         scores += position_bias
         attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
