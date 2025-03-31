@@ -31,6 +31,7 @@ from momentfm.utils.forecasting_metrics import get_forecasting_metrics
 from momentfm.models.layers.embed import PatchEmbedding
 control_randomness(seed=13) 
 
+
 class MomentFinetune():
     def __init__(self, args):
         super().__init__()
@@ -49,7 +50,8 @@ class MomentFinetune():
         self.scale_weight_lr = args.scale_weight_lr
         self.weight_decay = args.weight_decay
         self.device_name = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+        self.num_new_scales = args.num_new_scales
+        self.pred_mask_tokens = args.pred_mask_tokens
         self.model_name = args.version
         self.d_model = {"small":512, "base":768, "large":1024}[self.model_name]
         self.seq_len = 512
@@ -57,7 +59,6 @@ class MomentFinetune():
         self.ds_factor = 2 
         self.pred_length = args.pred_length
         self.patch_stride_len = 8
-        self.scale_num_patch = {}
         self.mask_generator = Masking()
         self.early_stopping = EarlyStopping(
             patience=self.patience, 
@@ -66,49 +67,26 @@ class MomentFinetune():
             path=f"{self.dataset}_{self.pred_length}_best_model.pth",
             trace_func=print
         )
-        # model out后找到mask对应的位置
-        self.SCALE_INDEX = {96:[
-                list(range(64, 76)),   # Scale 0: 从索引 64 到 75（12 个 Patch） 
-                list(range(108, 114)), # Scale 1: 从索引 108 到 113（6 个 Patch）
-                list(range(130, 133)), # Scale 2: 从索引 130 到 132（3 个 Patch）
-                list(range(141, 143))  # Scale 3: 从索引 141 到 142（2 个 Patch）
-                ],
-                            192:[
-                list(range(64, 88)),
-                list(range(120, 132)),
-                list(range(148, 154)),
-                list(range(162, 165))
-                ],
-                            336: [
-                list(range(64, 112)), 
-                list(range(128, 152)), 
-                list(range(160, 172)),
-                list(range(180, 186))  
-                ],
-                            720: [
-                list(range(64, 160)),
-                list(range(180, 228)),
-                list(range(240, 264)),
-                list(range(280, 292)) 
-            ]}[self.pred_length]
-        
-        # 不同pred length对应的mask所占patch长度
-        self.NUM_PATCH = {96:[12, 6, 3, 2],
-                          192:[24, 12, 6, 3],
-                          192:[48, 24, 12, 6],
-                          192:[96, 48, 24, 12]
-                          }[self.pred_length]
-
         # 新模块参数
         self.lora = args.lora
         self.linr = args.linear
         self.head_dropout = args.head_dropout
-        self.head_nf = [self.d_model * _ for _ in self.NUM_PATCH]
-        self.scale_weights = nn.Parameter(torch.ones(4, device=self.device_name)) 
-        self.linear = nn.ModuleList([nn.Linear(self.d_model, self.d_model) for _ in range(4)]).to(self.device_name) 
+
+        # Dim of Head's input. Use masked pred tokens or all ctx tokens.
+        if self.pred_mask_tokens:
+            self.head_nf = [self.d_model * _ for _ in self._num_pred_tokens_per_scale]
+        else:
+            self.head_nf = [self.d_model * _ for _ in self._num_ctx_tokens_per_scale]
+        self.scale_weights = nn.Parameter(torch.ones(1+self.num_new_scales, device=self.device_name))
+        self.linear = nn.ModuleList([nn.Linear(self.d_model, self.d_model) for _ in range(1+self.num_new_scales)]).to(self.device_name)
+        # 初始化为单位矩阵
+        for layer in self.linear:
+            nn.init.eye_(layer.weight)
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
 
         # 记录scale_loss的列表
-        self.scale_loss_history = [[] for _ in range(4)]
+        self.scale_loss_history = [[] for _ in range(1+self.num_new_scales)]
         self.L = []
         
         # 初始化预测头
@@ -118,6 +96,42 @@ class MomentFinetune():
             for _ in self.head_nf
             if (pred_length := max(1, pred_length // 2))  # 确保最小值不小于1
         ])
+
+    @property
+    def _ctx_len_per_scale(self):
+        return [math.ceil(self.seq_len / 2**i) for i in range(1+self.num_new_scales)]
+
+    @property
+    def _pred_len_per_scale(self):
+        return [math.ceil(self.pred_length / 2 ** i) for i in range(1+self.num_new_scales)]
+
+    @property
+    def _num_ctx_tokens_per_scale(self):
+        return [math.ceil(self._ctx_len_per_scale[i] / self.patch_size) for i in range(1+self.num_new_scales)]
+
+    @property
+    def _num_pred_tokens_per_scale(self):
+        return [math.ceil(self._pred_len_per_scale[i] / self.patch_size) for i in range(1+self.num_new_scales)]
+
+    def _index_of_a_given_scale(self, scale):
+        start = 0
+        if self.pred_mask_tokens:
+            for i in range(scale):
+                start += self._num_ctx_tokens_per_scale[i] + self._num_pred_tokens_per_scale[i]
+            end = start + self._num_ctx_tokens_per_scale[scale] + self._num_pred_tokens_per_scale[scale]
+        else:
+            for i in range(scale):
+                start += self._num_ctx_tokens_per_scale[i]
+            end = start + self._num_ctx_tokens_per_scale[scale]
+        return list(range(start, end))
+
+    def _pred_index_of_a_given_scale(self, scale):
+        start = 0
+        for i in range(scale):
+            start += self._num_ctx_tokens_per_scale[i] + self._num_pred_tokens_per_scale[i]
+        start = start + self._num_ctx_tokens_per_scale[scale]
+        end = start + self._num_pred_tokens_per_scale[scale]
+        return list(range(start, end))
 
     def _build_model(self):
         config = T5Config(
@@ -149,53 +163,53 @@ class MomentFinetune():
                             use_cache=True,
                             vocab_size=32128
                         )
+
         self.normalizer = RevIN(
             num_features=1, affine=False
         )
+        self.scale_normalizers = nn.ModuleList([RevIN(num_features=1, affine=False) for _ in range(1+self.num_new_scales)])
         print(config)
-        if self.lora: self.model =  T5EncoderModel_LoRA(config,pred_length=self.pred_length).get_encoder()
-        else: self.model =  T5EncoderModel(config).get_encoder()
-
-        checkpoint_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),f"MOMENT_{self.model_name}_{self.pred_length}.ckpt")
-        self.checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        if self.lora:
+            self.model =  T5EncoderModel_LoRA(config,
+                                              num_new_scales=self.num_new_scales,
+                                              pred_length=self.pred_length,
+                                              pred_mask_tokens=self.pred_mask_tokens
+                                              ).get_encoder()
+        else:
+            self.model =  T5EncoderModel(config).get_encoder()
+        checkpoint_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), f"MOMENT_{self.model_name}.ckpt")
+        self.checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
         encoder_state_dict = {k.replace("encoder.", ""): v for k, v in self.checkpoint.items() if k.startswith("encoder.")}
         missing_keys, unexpected_keys = self.model.load_state_dict(encoder_state_dict, strict=False)
 
         self._get_embeder()
-
-        print(f"✅ 成功加载参数: {encoder_state_dict.keys()-missing_keys}")
-        print(f"❌ Checkpoint中没有的参数: {missing_keys}")
-        print(f"⚠️ 模型中没有的参数: {unexpected_keys}")
-
         self.model.to(self.device_name)
 
         # 冻结训练参数
         for name, param in self.model.named_parameters():
-            # 冻结所有 self-attention 层的 base_layer
+            # 冻结所有 self-attention 层的 base_layer  # SelfAttention.o
             if "SelfAttention.q" in name or "SelfAttention.k" in name or "SelfAttention.v" in name or "DenseReluDense" in name:
                 param.requires_grad = False
 
-        print(self.model)
+    def _get_embeder(self):
+        self.patch_embedding = PatchEmbedding(
+            d_model=self.d_model,
+            seq_len=self.seq_len,
+            patch_len=self.patch_size,
+            stride=self.patch_stride_len,
+            patch_dropout=0.1,
+            add_positional_embedding=True,
+            value_embedding_bias=False,
+            orth_gain=1.41,
+        )
 
-        # 查看需训练参数
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                print(name, param.shape)
+        # 重新映射 checkpoint 里的 key,加载到PatchEmbedding中
+        patch_embedding_checkpoint = {key.replace("patch_embedding.", ""): value for key, value in self.checkpoint.items()}
+        self.patch_embedding.load_state_dict(patch_embedding_checkpoint, strict=False)
+        self.patch_embedding = self.freeze_parameters(self.patch_embedding)
+        self.patch_embedding.to(self.device_name)
 
-        for name, param in enumerate(self.patch_embedding.parameters()):
-            if param.requires_grad:
-                print(name, param.shape)
-
-        for i, param in enumerate(self.linear.parameters()):
-            if param.requires_grad:
-                print(f"linear_{i}", param.shape)
-
-        for i, param in enumerate(self.heads.parameters()):
-            if param.requires_grad:
-                print(f"heads_{i}", param.shape)
-
-        
     def _get_lr_schedular(self):
         self.lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optimizer=self.optimizer,
@@ -203,6 +217,7 @@ class MomentFinetune():
                 epochs=self.max_epoch,
                 steps_per_epoch=len(self.dataloader["train"]),
             )
+
     def _get_optimizer(self):
         self.optimizer = optim.AdamW(
             [
@@ -227,9 +242,12 @@ class MomentFinetune():
         )
 
     def _get_dataloader(self):
-        train_dataset = InformerDataset(data_split="train", random_seed=13, forecast_horizon=self.pred_length, full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
-        val_dataset = InformerDataset(data_split="val", random_seed=13, forecast_horizon=self.pred_length, full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
-        test_dataset = InformerDataset(data_split="test", random_seed=13, forecast_horizon=self.pred_length, full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
+        train_dataset = InformerDataset(data_split="train", random_seed=13, forecast_horizon=self.pred_length,
+                                        full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
+        val_dataset = InformerDataset(data_split="val", random_seed=13, forecast_horizon=self.pred_length,
+                                      full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
+        test_dataset = InformerDataset(data_split="test", random_seed=13, forecast_horizon=self.pred_length,
+                                       full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
 
         train_loader = DataLoader(train_dataset, batch_size=self.train_bs, num_workers=self.NumWorkers, shuffle=True, pin_memory=True)
         val_loader = DataLoader(val_dataset, batch_size=self.eval_bs, num_workers=self.NumWorkers, shuffle=True, pin_memory=True)
@@ -238,64 +256,73 @@ class MomentFinetune():
 
     def _downsample(self, timeseries, forecast, input_mask) -> tuple:
         """
-        对时间序列和预测序列进行三次降采样
-        
-        参数:
         timeseries: [batch_size, channel, context_length]
         forecast: [batch_size, channel, predict_length]
-        
-        返回:
-        scale_ts: 在num_patch维度拼接的timeseries+forecast, 共四个尺度
-        scale_seq_mask: 在一个sequence中表示哪些是padding过的[batch_size, sequence_length]
-        scale_patch_mask: 在一个patch sequence中表示哪些是需要预测的[batch_size, num_patch]
+        input_mask: [batch_size, context_length]
+
+        Returns:
+        scale_ts: List of (bs, channel, num_patch, ps) scale_fc: List of (bs, channel, predict_length)
+        scale_input_mask: (batch_size, combined_sequence_length)
+        scale_pred_mask: 在一个patch sequence中表示哪些是需要预测的[batch_size, num_patch]
         """
         batch_size, channel, context_length = timeseries.shape
         _, _, prediction_length = forecast.shape
-        scale_ts, scale_fc, scale_seq_mask, scale_patch_mask = [], [], [], []
+        scale_ts, scale_fc, scale_input_mask, scale_pred_mask = [], [], [], []
 
-        timeseries = self.normalizer(x=timeseries, mask=input_mask, mode="norm")
+        # timeseries = self.normalizer(x=timeseries, mask=input_mask, mode="norm")
+
         timeseries = torch.nan_to_num(timeseries, nan=0, posinf=0, neginf=0)
-
         new_context_length = context_length
         new_prediction_length = prediction_length
         new_timeseries = timeseries
         new_forecast = forecast
-        padding_needed = 0
+        new_input_mask = input_mask
 
-        for i in range(4):
+        for i in range(1+self.num_new_scales):
             self.ds_factor = 1 if i == 0 else 2
             new_context_length = math.ceil(new_context_length / self.ds_factor)
             new_prediction_length = math.ceil(new_prediction_length / self.ds_factor)
 
+            # QZ: 每个scale更新input_mask
+            new_input_mask = new_input_mask.unsqueeze(1).float()
+            new_input_mask = nn.functional.max_pool1d(new_input_mask, kernel_size=self.ds_factor, stride=self.ds_factor)
+            new_input_mask = new_input_mask.squeeze(1).int()
+            # 每个scale单独做RevIN
             new_timeseries = nn.functional.avg_pool1d(new_timeseries, kernel_size=self.ds_factor, stride=self.ds_factor)
+            new_timeseries = self.scale_normalizers[i](x=new_timeseries, mask=new_input_mask, mode="norm")
+
             new_forecast = nn.functional.avg_pool1d(new_forecast, kernel_size=self.ds_factor, stride=self.ds_factor)
             scale_fc.append(new_forecast)
-            
-            if new_prediction_length % self.patch_size !=0:
+
+            if new_prediction_length % self.patch_size != 0:
                 padding_needed = self.patch_size - (new_prediction_length % self.patch_size)
-                new_forecast = torch.nn.functional.pad(new_forecast, (0,padding_needed))
-            
-            # 拼接context和预测部分
-            ts_patch = new_timeseries.reshape(batch_size, channel, -1, self.patch_size)          
-            fc_patch = new_forecast.reshape(batch_size, channel, -1, self.patch_size)
-            combined = torch.cat([ts_patch, fc_patch], dim=2).to(torch.float32)
-            scale_ts.append(combined)
+                new_forecast = torch.nn.functional.pad(new_forecast, (0, padding_needed))
 
-            # 生成scale_seq_mask
-            ones = torch.ones(batch_size, new_context_length + new_prediction_length) 
-            zeros = torch.zeros(batch_size, padding_needed)  
-            seq_mask = torch.cat([ones, zeros], dim=1)
-            scale_seq_mask.append(seq_mask)
+            if self.pred_mask_tokens:  # 拼接context和预测部分
+                ts_patch = new_timeseries.reshape(batch_size, channel, -1, self.patch_size)
+                fc_patch = new_forecast.reshape(batch_size, channel, -1, self.patch_size)
+                combined = torch.cat([ts_patch, fc_patch], dim=2).to(torch.float32)
+                scale_ts.append(combined)
 
-            # 生成scale_patch_mask
-            ones = torch.ones(batch_size, ts_patch.shape[2]) 
-            zeros = torch.zeros(batch_size, fc_patch.shape[2])  
-            patch_mask = torch.cat([ones, zeros], dim=1)
-            scale_patch_mask.append(patch_mask)
+                # 生成scale_pred_mask
+                ones = torch.ones(batch_size, ts_patch.shape[2], device=new_input_mask.device)
+                zeros = torch.zeros(batch_size, fc_patch.shape[2], device=new_input_mask.device)
+                pred_mask = torch.cat([ones, zeros], dim=1)
+                scale_pred_mask.append(pred_mask)
 
-            # 每个scale占多少个patch
-            self.scale_num_patch[i] = combined.shape[2]
-        return scale_ts, scale_fc, scale_seq_mask, scale_patch_mask
+                ones = torch.ones((batch_size, new_forecast.size(-1)), device=new_input_mask.device)
+                combined = torch.cat((new_input_mask, ones), dim=1)
+                scale_input_mask.append(combined)
+
+            else:
+                ts_patch = new_timeseries.reshape(batch_size, channel, -1, self.patch_size).float()
+                scale_ts.append(ts_patch)
+
+                scale_pred_mask.append(torch.ones((ts_patch.size(0), ts_patch.size(2)), device=ts_patch.device))
+
+                scale_input_mask.append(new_input_mask)
+
+        return scale_ts, scale_fc, torch.concat(scale_input_mask, dim=1), scale_pred_mask
         
     def _upsample(self,  input_tensor) -> tuple:
         batch_size, n_channel, length = input_tensor.shape
@@ -304,22 +331,6 @@ class MomentFinetune():
         upsampled_tensor = input_tensor.repeat_interleave(factor, dim=2)
         return upsampled_tensor
 
-    def _get_embeder(self):
-        self.patch_embedding = PatchEmbedding(
-            d_model=self.d_model,
-            seq_len=self.seq_len,
-            patch_len=self.patch_size,
-            stride=self.patch_stride_len,
-            patch_dropout= 0.1,
-            add_positional_embedding= True,
-            value_embedding_bias= False,
-            orth_gain=1.41,
-        )
-
-        # 重新映射 checkpoint 里的 key,加载到PatchEmbedding中
-        patch_embedding_checkpoint = {key.replace("patch_embedding.", ""): value for key, value in self.checkpoint.items()}
-        self.patch_embedding.load_state_dict(patch_embedding_checkpoint, strict=False)    
-        self.patch_embedding = self.freeze_parameters(self.patch_embedding)
     def freeze_parameters(self, model):
         """
         Freeze parameters of the model
@@ -331,8 +342,11 @@ class MomentFinetune():
 
         return model
     
-    def embed(self, x, input_masks):
-        input_embed = [self.patch_embedding(_, input_mask).to(self.device_name) for _, input_mask in zip(x, input_masks)]
+    def embed(self, x, masks):
+        """
+        masks: If replace tokens with mask embeddings
+        """
+        input_embed = [self.patch_embedding(_, mask) for _, mask in zip(x, masks)]
         return input_embed        
     
     def cal_scale_loss(self, scale_ts, scale_fc, step):
@@ -368,51 +382,58 @@ class MomentFinetune():
 
         return L.to(torch.float16).to(self.device_name)  # 确保返回值类型正确
 
+    def forward_batch(self, timeseries, forecast, input_mask):
+        timeseries = timeseries.to(self.device_name)
+        forecast = forecast.to(self.device_name)
+        input_mask = input_mask.to(self.device_name)
+
+        batch_size, n_channels, _ = timeseries.shape
+
+        scale_ts, scale_fc, observed_mask, scale_pred_mask = self._downsample(timeseries, forecast, input_mask)
+        n_patches = sum([_.shape[2] for _ in scale_ts])
+        input_embed = self.embed(scale_ts, scale_pred_mask)
+
+        if self.linr:
+            for i in range(1 + self.num_new_scales):
+                if self.pred_mask_tokens:  # 只对context部分投影
+                    ctx_tokens = self._num_ctx_tokens_per_scale[i]
+                    input_embed[i][:, :, :ctx_tokens, :] = self.linear[i](input_embed[i][:, :, :ctx_tokens, :])
+                else:
+                    input_embed[i] = self.linear[i](input_embed[i])
+
+        # 拼接不同尺度
+        enc_in = torch.cat(input_embed, dim=2).reshape(batch_size * n_channels, n_patches, self.d_model)
+
+        # attention mask
+        patch_view_mask = Masking.convert_seq_to_patch_view(observed_mask, self.patch_size).to(self.device_name)
+        attention_mask = patch_view_mask.repeat_interleave(n_channels, dim=0)
+
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+            output = self.model(inputs_embeds=enc_in, attention_mask=attention_mask)
+            enc_out = output.last_hidden_state.reshape(-1, n_channels, n_patches, self.d_model)
+            if self.pred_mask_tokens:
+                scale_repr = [enc_out[..., self._pred_index_of_a_given_scale(i), :] for i in range(1 + self.num_new_scales)]
+            else:
+                scale_repr = [enc_out[..., self._index_of_a_given_scale(i), :] for i in range(1 + self.num_new_scales)]
+            scale_head_out = [head(repr) for head, repr in zip(self.heads, scale_repr)]
+            scale_denorm_out = [self.scale_normalizers[i](x=scale_head_out[i], mode="denorm") for i in range(1 + self.num_new_scales)]
+
+        return scale_denorm_out, scale_fc
+
     def train(self):
-        step = 0 
+        step = 0
         for epoch in range(self.max_epoch):
             self.model.train()
             self.patch_embedding.train()
             self.linear.train()
             self.heads.train()
             losses = []
+
             for timeseries, forecast, input_mask in tqdm(self.dataloader["train"], total=len(self.dataloader["train"])):
                 step += 1
-                
-                # 获取batch_size, n_channels
-                batch_size, n_channels, _ = timeseries.shape
+                denorm_out, scale_fc = self.forward_batch(timeseries, forecast, input_mask)
 
-                # 降采样得到数据和scale_ts/input_seq_mask/input_patch_mask (4 scale)
-                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast, input_mask)
-                n_patches = sum([ _.shape[2] for _ in scale_ts])
-
-                # 先Embedding（含Mask Embedding），再投影
-                input_embed = self.embed(scale_ts, input_patch_mask)
-                # input_embed = self.embed(scale_ts, [torch.ones_like(_) for _ in input_patch_mask])
-
-                # 分不同尺度投影
-                if self.linr: input_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
-
-                # 先Embedding（不含Mask Embedding），然后投影，再Mask Embedding
-                # input_embed = [self.patch_embedding.apply_mask_embedding(_, input_mask).to(self.device_name) for _, input_mask in zip(input_embed, input_patch_mask)]
-
-                # 进入encoder之前拼接不同尺度
-                enc_in = torch.cat([_ for _ in input_embed], dim=2)
-                enc_in = enc_in.reshape(batch_size*n_channels, n_patches,self.d_model).to(self.device_name)
-
-                attn_mask = torch.cat([_ for _ in input_patch_mask], dim=1)
-                attn_mask = attn_mask.unsqueeze(1).repeat(1, n_channels, 1)
-                attn_mask = attn_mask.reshape(batch_size*n_channels, n_patches).to(self.device_name)
-                
-                with torch.amp.autocast(device_type='cuda',  dtype=torch.float16):
-                    output = self.model(inputs_embeds = enc_in, attention_mask = attn_mask)
-                
-                    enc_out = output.last_hidden_state
-                    enc_out = enc_out.reshape((-1, n_channels, n_patches, self.d_model))
-                    mask_out = [enc_out[..., indices, :] for indices in self.SCALE_INDEX] 
-                    head_out = [head(mask) for head, mask in zip(self.heads,mask_out)]
-                    denorm_out = [self.normalizer(x=_.to(self.device_name), mode="denorm") for _ in head_out]
-
+                with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                     loss = self.cal_scale_loss(denorm_out, scale_fc, step)
 
                 self.scaler.scale(loss).backward()
@@ -429,176 +450,68 @@ class MomentFinetune():
 
                 losses.append(loss.item())
 
-                # 每 100 个步骤记录一次训练损失
                 if step % 100 == 0:
                     avg_loss = np.mean(losses[-100:])  # 计算最近 100 个步骤的平均损失
                     writer.add_scalar("Loss/train_step", avg_loss, step)
-                    print(f"Epoch [{epoch+1}/{self.max_epoch}] Step [{step}] - Train Loss: {avg_loss:.3f}")
+                    print(f"Epoch [{epoch + 1}/{self.max_epoch}] Step [{step}] - Train Loss: {avg_loss:.3f}")
 
-            losses = np.array(losses)
-            average_loss = np.average(losses)
-            writer.add_scalar("Loss/train", average_loss, global_step=epoch)
+            train_loss = np.mean(losses)
+            writer.add_scalar("Loss/train", train_loss, global_step=epoch)
 
             scale_weights = torch.softmax(self.scale_weights, dim=0)
-            for num in range(scale_weights.shape[0]):
-                writer.add_scalar(f'scale_weights/{num}', scale_weights[num], global_step=epoch)
+            for i, weight in enumerate(scale_weights):
+                writer.add_scalar(f'scale_weights/{i}', weight, global_step=epoch)
 
             self.lr_scheduler.step()
 
-            early_stop = self.eval(cur_epoch=epoch)
-            if early_stop:
-                print(f"Training stopped early at epoch {epoch+1}/{self.max_epoch}")
-                break
+            val_loss = self.eval(cur_epoch=epoch, mode='val')
 
-    def eval(self, cur_epoch):
-        trues, preds, histories, losses = [], [], [], []
-        self.model.eval()
-        self.patch_embedding.eval()
-        self.linear.eval()
-        self.heads.eval()
-        
-        with torch.no_grad():
-            for timeseries, forecast, input_mask in tqdm(self.dataloader["val"], total=len(self.dataloader["val"])):
-                # 获取batch_size, n_channels
-                batch_size, n_channels, _ = timeseries.shape
-
-                # 降采样得到数据和scale_ts/input_seq_mask/input_patch_mask (4 scale)
-                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast, input_mask)
-                n_patches = sum([ _.shape[2] for _ in scale_ts])
-
-                # 先Embedding（含Mask Embedding），再投影
-                input_embed = self.embed(scale_ts, input_patch_mask)
-                # input_embed = self.embed(scale_ts, [torch.ones_like(_) for _ in input_patch_mask])
-
-
-                # 分不同尺度投影
-                if self.linr: input_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
-
-                # 先Embedding（不含Mask Embedding），然后投影，再Mask Embedding
-                # input_embed = [self.patch_embedding.apply_mask_embedding(_, input_mask).to(self.device_name) for _, input_mask in zip(input_embed, input_patch_mask)]
-
-                # 进入encoder之前拼接不同尺度
-                enc_in = torch.cat([_ for _ in input_embed], dim=2)
-                enc_in = enc_in.reshape(batch_size*n_channels, n_patches,self.d_model).to(self.device_name)
-
-                attn_mask = torch.cat([_ for _ in input_patch_mask], dim=1)
-                attn_mask = attn_mask.unsqueeze(1).repeat(1, n_channels, 1)
-                attn_mask = attn_mask.reshape(batch_size*n_channels, n_patches).to(self.device_name)
-
-                with torch.amp.autocast(device_type='cuda'):
-                    output = self.model(inputs_embeds = enc_in, attention_mask = attn_mask.to(torch.bool))
-                
-                enc_out = output.last_hidden_state
-                enc_out = enc_out.reshape((-1, n_channels, n_patches, self.d_model))
-                mask_out = [enc_out[..., indices, :] for indices in self.SCALE_INDEX] 
-                head_out = [head(mask) for head, mask in zip(self.heads,mask_out)]
-                denorm_out = [self.normalizer(x=_, mode="denorm") for _ in head_out]
-
-                # upsampling
-                up_sampling = [self._upsample(head) for head in denorm_out]
-
-                weighted_forecast = 0
-                scale_weights = torch.softmax(self.scale_weights, dim=0)
-                for i, weight in enumerate(scale_weights):
-                    weighted_forecast += weight * up_sampling[i] 
-                
-                loss = self.criterion(weighted_forecast.float(), forecast.float().to(self.device_name))
-                losses.append(loss.item())
-                trues.append(forecast.detach().cpu().numpy())
-                preds.append(weighted_forecast.detach().cpu().numpy())
-                histories.append(timeseries.detach().cpu().numpy())
-
-            losses = np.array(losses)
-            average_loss = np.average(losses)
-            trues = np.concatenate(trues, axis=0)
-            preds = np.concatenate(preds, axis=0)
-            histories = np.concatenate(histories, axis=0)
-            
-            metrics = get_forecasting_metrics(y=trues, y_hat=preds, reduction="mean")
-
-            writer.add_scalar(f"Loss/Val", average_loss, global_step=cur_epoch)
-            writer.add_scalar(f"Val/MSE", metrics.mse, global_step=cur_epoch)
-            writer.add_scalar(f"Val/MAE", metrics.mae, global_step=cur_epoch)
-
-            if self.BestEvalLoss > average_loss:
-                self.BestEvalLoss = average_loss
-                self.test(cur_epoch)
+            if self.BestEvalLoss > val_loss:
+                self.BestEvalLoss = val_loss
+                self.eval(cur_epoch=epoch, mode='test')
                 self.save_model()
-             
-            self.early_stopping(average_loss, self.model)
+
+            self.early_stopping(val_loss, self.model)
             if self.early_stopping.early_stop:
                 print("Early stopping triggered")
-                return True  
-            
-            return False 
-    def test(self, cur_epoch):
+                print(f"Training stopped early at epoch {epoch + 1}/{self.max_epoch}")
+                break
+    
+    @torch.no_grad()
+    def eval(self, cur_epoch, mode="val"):
         trues, preds, histories, losses = [], [], [], []
         self.model.eval()
         self.patch_embedding.eval()
         self.linear.eval()
         self.heads.eval()
-        
-        with torch.no_grad():
-            for timeseries, forecast, input_mask in tqdm(self.dataloader["test"], total=len(self.dataloader["test"])):
-                # 获取batch_size, n_channels
-                batch_size, n_channels, _ = timeseries.shape
 
-                # 降采样得到数据和scale_ts/input_seq_mask/input_patch_mask (4 scale)
-                scale_ts, scale_fc, input_seq_mask, input_patch_mask = self._downsample(timeseries, forecast, input_mask)
-                n_patches = sum([ _.shape[2] for _ in scale_ts])
+        for timeseries, forecast, input_mask in tqdm(self.dataloader[f"{mode}"], total=len(self.dataloader[f"{mode}"])):
 
-                # 先Embedding（含Mask Embedding），再投影
-                input_embed = self.embed(scale_ts, input_patch_mask)
-                # input_embed = self.embed(scale_ts, [torch.ones_like(_) for _ in input_patch_mask])
+            denorm_out, _ = self.forward_batch(timeseries, forecast, input_mask)
+            up_sampling = [self._upsample(out) for out in denorm_out]
 
-                # 分不同尺度投影
-                if self.linr: input_embed = [linear(inp) for linear, inp in zip(self.linear, input_embed)]
+            weighted_forecast = 0
+            scale_weights = torch.softmax(self.scale_weights, dim=0)
+            for i, weight in enumerate(scale_weights):
+                weighted_forecast += weight * up_sampling[i]
 
-                # 先Embedding（不含Mask Embedding），然后投影，再Mask Embedding
-                # input_embed = [self.patch_embedding.apply_mask_embedding(_, input_mask).to(self.device_name) for _, input_mask in zip(input_embed, input_patch_mask)]
+            loss = self.criterion(weighted_forecast.float(), forecast.float().to(self.device_name))
+            losses.append(loss.item())
+            trues.append(forecast.detach().cpu().numpy())
+            preds.append(weighted_forecast.detach().cpu().numpy())
 
-                # 进入encoder之前拼接不同尺度
-                enc_in = torch.cat([_ for _ in input_embed], dim=2)
-                enc_in = enc_in.reshape(batch_size*n_channels, n_patches,self.d_model).to(self.device_name)
+        losses = np.array(losses)
+        average_loss = np.average(losses)
+        trues = np.concatenate(trues, axis=0)
+        preds = np.concatenate(preds, axis=0)
 
-                attn_mask = torch.cat([_ for _ in input_patch_mask], dim=1)
-                attn_mask = attn_mask.unsqueeze(1).repeat(1, n_channels, 1)
-                attn_mask = attn_mask.reshape(batch_size*n_channels, n_patches).to(self.device_name)
+        metrics = get_forecasting_metrics(y=trues, y_hat=preds, reduction="mean")
 
-                with torch.amp.autocast(device_type='cuda'):
-                    output = self.model(inputs_embeds = enc_in, attention_mask = attn_mask.to(torch.bool))
-                
-                enc_out = output.last_hidden_state
-                enc_out = enc_out.reshape((-1, n_channels, n_patches, self.d_model))
-                mask_out = [enc_out[..., indices, :] for indices in self.SCALE_INDEX] 
-                head_out = [head(mask) for head, mask in zip(self.heads,mask_out)]
-                denorm_out = [self.normalizer(x=_, mode="denorm") for _ in head_out]
+        writer.add_scalar(f"Loss/{mode}", average_loss, global_step=cur_epoch)
+        writer.add_scalar(f"{mode}/MSE", metrics.mse, global_step=cur_epoch)
+        writer.add_scalar(f"{mode}/MAE", metrics.mae, global_step=cur_epoch)
 
-                # upsampling
-                up_sampling = [self._upsample(head) for head in denorm_out]
-
-                weighted_forecast = 0
-                scale_weights = torch.softmax(self.scale_weights, dim=0)
-                for i, weight in enumerate(scale_weights):
-                    weighted_forecast += weight * up_sampling[i] 
-                
-                loss = self.criterion(weighted_forecast.float(), forecast.float().to(self.device_name))
-                losses.append(loss.item())
-                trues.append(forecast.detach().cpu().numpy())
-                preds.append(weighted_forecast.detach().cpu().numpy())
-                histories.append(timeseries.detach().cpu().numpy())
-
-            losses = np.array(losses)
-            average_loss = np.average(losses)
-            trues = np.concatenate(trues, axis=0)
-            preds = np.concatenate(preds, axis=0)
-            histories = np.concatenate(histories, axis=0)
-            
-            metrics = get_forecasting_metrics(y=trues, y_hat=preds, reduction="mean")
-
-            writer.add_scalar(f"Loss/Test", average_loss, global_step=cur_epoch)
-            writer.add_scalar(f"Test/MSE", metrics.mse, global_step=cur_epoch)
-            writer.add_scalar(f"Test/MAE", metrics.mae, global_step=cur_epoch)
+        return average_loss
 
     def save_model(self):
         checkpoint = {
@@ -609,6 +522,7 @@ class MomentFinetune():
 
         with open(os.path.join("./", f"{self.dataset}_{self.pred_length}_checkpoint.pth"),"wb",) as f:
             torch.save(checkpoint, f)
+
     def main(self):
         self._build_model()
         self._get_dataloader()
@@ -620,15 +534,18 @@ class MomentFinetune():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="ETTh1", choices=["ETTh1", "ETTh2", "ETTm1", "ETTm2"])
-    parser.add_argument("--train_bs", type=int, default=8, help="Batch size for training")
-    parser.add_argument("--eval_bs", type=int, default=8, help="Batch size for evaluation")
-    parser.add_argument("--max_epoch", type=int, default=3, help="Maximum number of training epochs")
-    parser.add_argument("--init_lr", type=float, default=1e-4, help="Initial learning rate (default is dataset-specific)")
-    parser.add_argument("--head_lr", type=float, default=1e-4, help="Initial learning rate (default is dataset-specific)")
-    parser.add_argument("--scale_weight_lr", type=float, default=5e-5, help="Learning rate for scale weights")
+    parser.add_argument("--num_new_scales", type=int, default=1, help="Batch size for training")
+    parser.add_argument("--train_bs", type=int, default=64, help="Batch size for training")
+    parser.add_argument("--eval_bs", type=int, default=64, help="Batch size for evaluation")
+    parser.add_argument("--max_epoch", type=int, default=10, help="Maximum number of training epochs")
+    parser.add_argument("--init_lr", type=float, default=5e-7, help="Initial learning rate (default is dataset-specific)")
+    parser.add_argument("--head_lr", type=float, default=1e-3, help="Initial learning rate (default is dataset-specific)")
+    parser.add_argument("--scale_weight_lr", type=float, default=1e-2, help="Learning rate for scale weights")
     parser.add_argument("--pred_length", type=int, default=96, help="Prediction length")
     parser.add_argument("--lora", type=lambda x: x.lower() == "true", default=True)
     parser.add_argument("--linear", type=lambda x: x.lower() == "true", default=True)
+    parser.add_argument("--pred_mask_tokens", type=lambda x: x.lower() == "true", default=True,
+                        help="Use masked prediction tokens like Moirai or Use context tokens like original Moment")
     parser.add_argument("--weight_decay", type=float, default=0)
     parser.add_argument("--head_dropout", type=float, default=0.1, help="head_dropout")
     parser.add_argument("--patience", type=int, default=5, help="patience")

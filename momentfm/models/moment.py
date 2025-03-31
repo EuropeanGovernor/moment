@@ -431,7 +431,7 @@ class MOMENT(nn.Module):
         enc_in = enc_in.reshape(
             (batch_size * n_channels, n_patches, self.config.d_model)
         )
-
+        # 只有1个patch里所有input_mask都为1，这个patch的patch_view_mask才为1
         patch_view_mask = Masking.convert_seq_to_patch_view(input_mask, self.patch_len)
         attention_mask = patch_view_mask.repeat_interleave(n_channels, dim=0)
         outputs = self.encoder(inputs_embeds=enc_in, attention_mask=attention_mask)
