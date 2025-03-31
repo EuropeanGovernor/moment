@@ -289,7 +289,7 @@ class MomentFinetune():
             new_input_mask = new_input_mask.squeeze(1).int()
             # 每个scale单独做RevIN
             new_timeseries = nn.functional.avg_pool1d(new_timeseries, kernel_size=self.ds_factor, stride=self.ds_factor)
-            new_timeseries = self.scale_normalizers[i](x=new_timeseries, mask=new_input_mask, mode="norm")
+            new_normed_timeseries = self.scale_normalizers[i](x=new_timeseries, mask=new_input_mask, mode="norm")
 
             new_forecast = nn.functional.avg_pool1d(new_forecast, kernel_size=self.ds_factor, stride=self.ds_factor)
             scale_fc.append(new_forecast)
@@ -299,7 +299,7 @@ class MomentFinetune():
                 new_forecast = torch.nn.functional.pad(new_forecast, (0, padding_needed))
 
             if self.pred_mask_tokens:  # 拼接context和预测部分
-                ts_patch = new_timeseries.reshape(batch_size, channel, -1, self.patch_size)
+                ts_patch = new_normed_timeseries.reshape(batch_size, channel, -1, self.patch_size)
                 fc_patch = new_forecast.reshape(batch_size, channel, -1, self.patch_size)
                 combined = torch.cat([ts_patch, fc_patch], dim=2).to(torch.float32)
                 scale_ts.append(combined)
@@ -315,7 +315,7 @@ class MomentFinetune():
                 scale_input_mask.append(combined)
 
             else:
-                ts_patch = new_timeseries.reshape(batch_size, channel, -1, self.patch_size).float()
+                ts_patch = new_normed_timeseries.reshape(batch_size, channel, -1, self.patch_size).float()
                 scale_ts.append(ts_patch)
 
                 scale_pred_mask.append(torch.ones((ts_patch.size(0), ts_patch.size(2)), device=ts_patch.device))
@@ -347,8 +347,26 @@ class MomentFinetune():
         masks: If replace tokens with mask embeddings
         """
         input_embed = [self.patch_embedding(_, mask) for _, mask in zip(x, masks)]
-        return input_embed        
-    
+        return input_embed
+
+
+    # def embed(self, x, masks):
+    #     """
+    #     masks: If replace tokens with mask embeddings
+    #     """
+    #     x_ = torch.cat(x, dim=2)
+    #     masks_ = torch.cat(masks, dim=1)
+    #     input_embed = self.patch_embedding(x_, masks_)
+    #
+    #     scale_input_embed = []
+    #
+    #     for i in range(1+self.num_new_scales):
+    #         scale_input_embed.append(input_embed[:, :, self._index_of_a_given_scale(i), :])
+    #
+    #     return scale_input_embed
+
+
+
     def cal_scale_loss(self, scale_ts, scale_fc, step):
         """
         计算不同尺度的损失并加权求和。
@@ -391,7 +409,10 @@ class MomentFinetune():
 
         scale_ts, scale_fc, observed_mask, scale_pred_mask = self._downsample(timeseries, forecast, input_mask)
         n_patches = sum([_.shape[2] for _ in scale_ts])
-        input_embed = self.embed(scale_ts, scale_pred_mask)
+        input_embed = self.embed(scale_ts, scale_pred_mask)  # List of (bs, channel, patch, ps)
+
+        norm0 = self.scale_normalizers[0]
+        norm1 = self.scale_normalizers[1]
 
         if self.linr:
             for i in range(1 + self.num_new_scales):
@@ -542,9 +563,9 @@ if __name__ == "__main__":
     parser.add_argument("--head_lr", type=float, default=1e-3, help="Initial learning rate (default is dataset-specific)")
     parser.add_argument("--scale_weight_lr", type=float, default=1e-2, help="Learning rate for scale weights")
     parser.add_argument("--pred_length", type=int, default=96, help="Prediction length")
-    parser.add_argument("--lora", type=lambda x: x.lower() == "true", default=True)
+    parser.add_argument("--lora", type=lambda x: x.lower() == "true", default=False)
     parser.add_argument("--linear", type=lambda x: x.lower() == "true", default=True)
-    parser.add_argument("--pred_mask_tokens", type=lambda x: x.lower() == "true", default=True,
+    parser.add_argument("--pred_mask_tokens", type=lambda x: x.lower() == "true", default=False,
                         help="Use masked prediction tokens like Moirai or Use context tokens like original Moment")
     parser.add_argument("--weight_decay", type=float, default=0)
     parser.add_argument("--head_dropout", type=float, default=0.1, help="head_dropout")
