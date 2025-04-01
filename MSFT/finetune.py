@@ -63,8 +63,8 @@ class MomentFinetune():
         self.early_stopping = EarlyStopping(
             patience=self.patience, 
             verbose=True,
-            delta=0.0001,
-            path=f"{self.dataset}_{self.pred_length}_best_model.pth",
+            delta=0.001,
+            # path=f"{self.dataset}_{self.pred_length}_best_model.pth",
             trace_func=print
         )
         # 新模块参数
@@ -242,12 +242,18 @@ class MomentFinetune():
         )
 
     def _get_dataloader(self):
+
+        if 'ETT' in self.dataset:
+            prefix = 'ETT-small'
+        else:
+            prefix = self.dataset
+
         train_dataset = InformerDataset(data_split="train", random_seed=13, forecast_horizon=self.pred_length,
-                                        full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
+                                        full_file_path_and_name=f"./long_term_forecast/{prefix}/{self.dataset}.csv")
         val_dataset = InformerDataset(data_split="val", random_seed=13, forecast_horizon=self.pred_length,
-                                      full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
+                                      full_file_path_and_name=f"./long_term_forecast/{prefix}/{self.dataset}.csv")
         test_dataset = InformerDataset(data_split="test", random_seed=13, forecast_horizon=self.pred_length,
-                                       full_file_path_and_name=f"./long_term_forecast/ETT-small/{self.dataset}.csv")
+                                       full_file_path_and_name=f"./long_term_forecast/{prefix}/{self.dataset}.csv")
 
         train_loader = DataLoader(train_dataset, batch_size=self.train_bs, num_workers=self.NumWorkers, shuffle=True, pin_memory=True)
         val_loader = DataLoader(val_dataset, batch_size=self.eval_bs, num_workers=self.NumWorkers, shuffle=True, pin_memory=True)
@@ -490,7 +496,7 @@ class MomentFinetune():
             if self.BestEvalLoss > val_loss:
                 self.BestEvalLoss = val_loss
                 self.eval(cur_epoch=epoch, mode='test')
-                self.save_model()
+                # self.save_model()
 
             self.early_stopping(val_loss, self.model)
             if self.early_stopping.early_stop:
@@ -554,7 +560,7 @@ class MomentFinetune():
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="ETTh1", choices=["ETTh1", "ETTh2", "ETTm1", "ETTm2"])
+    parser.add_argument("--dataset", type=str, default="ETTh1")
     parser.add_argument("--num_new_scales", type=int, default=1, help="Batch size for training")
     parser.add_argument("--train_bs", type=int, default=64, help="Batch size for training")
     parser.add_argument("--eval_bs", type=int, default=64, help="Batch size for evaluation")
@@ -573,6 +579,6 @@ if __name__ == "__main__":
     parser.add_argument("--version", type=str, default="small", help="")
     parser.add_argument("--note", type=str, default='')
     args = parser.parse_args()
-    writer = SummaryWriter(log_dir=f"../tf-logs/runs/{args.note}")
+    writer = SummaryWriter(log_dir=f"./tf-logs/{args.version}/{args.dataset}/{args.note}")
     MomentFinetune(args).main()
     writer.close()
