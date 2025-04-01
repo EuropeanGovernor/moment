@@ -373,7 +373,7 @@ class MomentFinetune():
 
 
 
-    def cal_scale_loss(self, scale_ts, scale_fc, step):
+    def cal_scale_loss(self, scale_ts, scale_fc, step, mode):
         """
         计算不同尺度的损失并加权求和。
         
@@ -391,18 +391,21 @@ class MomentFinetune():
             L += scale_loss * scale_weights[i]
     
             # 将当前尺度的损失记录到历史中
-            self.scale_loss_history[i].append(scale_loss.item())
+            if mode=="train": self.scale_loss_history[i].append(scale_loss.item())
+            else: self.scale_loss_history_eval[i].append(scale_loss.item())
 
             # 每 100 个步骤记录一次每个尺度的损失
-            if step % 100 == 0:
+            if mode=="train" and step % 100 == 0:
                 scale_avg_loss = np.mean(self.scale_loss_history[i][-100:])  # 计算最近 100 个步骤的平均损失
-                writer.add_scalar(f"Loss/scale_{i}", scale_avg_loss, global_step=step)
+                writer.add_scalar(f"Loss/Train/scale_{i}", scale_avg_loss, global_step=step)
+        
+        if mode=="train": self.L.append(L.item())
+        else: self.L_eval.append(L.item())
 
-        self.L.append(L.item())
         # 每 100 个步骤记录一次加权总损失
-        if step % 100 == 0:
+        if  mode=="train" and  step % 100 == 0:
             sum_scale_avg_loss = np.mean(self.L[-100:])  # 计算最近 100 个步骤的平均损失
-            writer.add_scalar(f"Loss/scale_sum", sum_scale_avg_loss, global_step=step)
+            writer.add_scalar(f"Loss/Train/scale_sum", sum_scale_avg_loss, global_step=step)
 
         return L.to(torch.float16).to(self.device_name)  # 确保返回值类型正确
 
@@ -461,7 +464,7 @@ class MomentFinetune():
                 denorm_out, scale_fc = self.forward_batch(timeseries, forecast, input_mask)
 
                 with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
-                    loss = self.cal_scale_loss(denorm_out, scale_fc, step)
+                    loss = self.cal_scale_loss(denorm_out, scale_fc, step, "train")
 
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
@@ -506,21 +509,28 @@ class MomentFinetune():
     
     @torch.no_grad()
     def eval(self, cur_epoch, mode="val"):
-        trues, preds, histories, losses = [], [], [], []
+        self.scale_loss_history_eval=[[] for _ in range(1+self.num_new_scales)]
+        self.L_eval = []
+
+        trues, preds, losses = [], [], []
         self.model.eval()
         self.patch_embedding.eval()
         self.linear.eval()
         self.heads.eval()
+        
 
         for timeseries, forecast, input_mask in tqdm(self.dataloader[f"{mode}"], total=len(self.dataloader[f"{mode}"])):
 
-            denorm_out, _ = self.forward_batch(timeseries, forecast, input_mask)
+            denorm_out, scale_fc = self.forward_batch(timeseries, forecast, input_mask)
             up_sampling = [self._upsample(out) for out in denorm_out]
 
             weighted_forecast = 0
             scale_weights = torch.softmax(self.scale_weights, dim=0)
             for i, weight in enumerate(scale_weights):
                 weighted_forecast += weight * up_sampling[i]
+
+            # 计算单个 batch 的加权损失
+            self.cal_scale_loss(denorm_out, scale_fc, cur_epoch, mode) 
 
             loss = self.criterion(weighted_forecast.float(), forecast.float().to(self.device_name))
             losses.append(loss.item())
@@ -538,6 +548,15 @@ class MomentFinetune():
         writer.add_scalar(f"{mode}/MSE", metrics.mse, global_step=cur_epoch)
         writer.add_scalar(f"{mode}/MAE", metrics.mae, global_step=cur_epoch)
 
+        # 计算尺度损失的平均值
+        avg_scale_losses = [np.mean(losses) if losses else 0 for losses in self.scale_loss_history_eval]
+        for i in range(len(avg_scale_losses)):
+            writer.add_scalar(f"Loss/{mode}/scale_{i}", avg_scale_losses[i], global_step=cur_epoch)
+
+        # 计算所有 batch 的加权总损失平均值
+        avg_total_L = np.mean(self.L_eval) if self.L_eval else 0
+        writer.add_scalar(f"Loss/{mode}/scale_sum", avg_total_L, global_step=cur_epoch)
+        
         return average_loss
 
     def save_model(self):
